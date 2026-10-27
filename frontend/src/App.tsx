@@ -1,16 +1,18 @@
-import { AlertTriangle, Factory, LayoutDashboard, ListTree, Moon, Package, Sun, SunMoon, Thermometer } from 'lucide-react'
+import { AlertTriangle, Factory, LayoutDashboard, ListTree, Monitor, Moon, Package, Sun, SunMoon, Thermometer } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import type { Info } from './api'
 import { usePoll, useLive } from './api'
 import { StateBadge } from './components/widgets'
+import { HmiPanel } from './hmi/HmiPanel'
 import { ago } from './format'
 import { AlarmsPage, Overview, ProductionPage, Temperatures, Variables, type PageProps } from './pages'
 import { useTheme, type ThemeChoice } from './theme'
 
-type PageId = 'geral' | 'temperaturas' | 'producao' | 'alarmes' | 'variaveis'
+type PageId = 'geral' | 'painel' | 'temperaturas' | 'producao' | 'alarmes' | 'variaveis'
 
 const PAGES: { id: PageId; label: string; icon: ReactNode; render: (p: PageProps) => ReactNode }[] = [
   { id: 'geral', label: 'Visão geral', icon: <LayoutDashboard size={18} />, render: (p) => <Overview {...p} /> },
+  { id: 'painel', label: 'Painel da máquina', icon: <Monitor size={18} />, render: (p) => <HmiPanel status={p.live?.status ?? null} /> },
   { id: 'temperaturas', label: 'Temperaturas', icon: <Thermometer size={18} />, render: (p) => <Temperatures {...p} /> },
   { id: 'producao', label: 'Produção', icon: <Package size={18} />, render: (p) => <ProductionPage {...p} /> },
   { id: 'alarmes', label: 'Alarmes', icon: <AlertTriangle size={18} />, render: (p) => <AlarmsPage {...p} /> },

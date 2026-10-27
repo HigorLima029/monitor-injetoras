@@ -107,6 +107,23 @@ def alarms(hours: float = Query(24, ge=1, le=24 * 31)):
     }
 
 
+@app.get("/api/values")
+def values(tags: str = Query(..., description="tags separadas por vírgula")):
+    """Valores atuais de uma lista de tags (usado pelas telas do painel).
+
+    As tags pedidas entram na leitura rápida por 30 s; assim a tela aberta
+    atualiza a cada POLL_SECONDS em vez de esperar a leitura completa.
+    """
+    c = _c(app)
+    wanted = [t for t in (s.strip() for s in tags.split(",")) if t][:300]
+    c.watch(wanted)
+    vals = c.current(wanted)
+    return {
+        "status": c.status(),
+        "values": {t: (v if to_number(v) is not None or v is None else str(v)) for t, v in vals.items()},
+    }
+
+
 @app.get("/api/tags")
 def tags(q: str = "", limit: int = Query(2000, ge=1, le=5000)):
     c = _c(app)

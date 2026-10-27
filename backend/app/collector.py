@@ -41,6 +41,7 @@ class Collector:
         self._last_full = 0.0
         self._last_prune = 0.0
         self._subscribers: set[asyncio.Queue] = set()
+        self._watched: dict[str, float] = {}
         self._task: asyncio.Task | None = None
 
     # ---- ciclo de vida --------------------------------------------------
@@ -72,7 +73,20 @@ class Collector:
     @property
     def fast_tags(self) -> list[str]:
         known = set(self.tags)
-        return [t for t in HISTORY_TAGS if t in known] + self.alarm_tags
+        now = time.time()
+        self._watched = {t: exp for t, exp in self._watched.items() if exp > now}
+        base = [t for t in HISTORY_TAGS if t in known] + self.alarm_tags
+        extra = [t for t in self._watched if t in known and t not in base]
+        return base + extra
+
+    def watch(self, tags: list[str], seconds: float = 30) -> None:
+        """Inclui tags na leitura rápida enquanto alguém está olhando a tela que as usa."""
+        until = time.time() + seconds
+        for t in tags:
+            self._watched[t] = until
+
+    def current(self, tags: list[str]) -> dict[str, Any]:
+        return {t: self.values.get(t) for t in tags}
 
     async def _run(self) -> None:
         while True:

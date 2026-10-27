@@ -13,7 +13,7 @@ import time
 from .config import settings
 from .storage import Storage
 
-SETPOINTS = {"TempNozzle": 230.0, "TempZ1": 270.0, "TempZ2": 260.0, "TempZ3": 250.0,
+SETPOINTS = {"TempNozzle": 99.0, "TempZ1": 270.0, "TempZ2": 260.0, "TempZ3": 250.0,
              "TempZ4": 200.0, "TempZ5": 200.0, "TempOil": 45.0}
 
 
@@ -48,8 +48,8 @@ def seed(storage: Storage, hours: float = 8, step: float = 30, seed_value: int =
             vals[sp_tag] = sp
             vals[now_tag] = round(sp - drift + 1.8 * math.sin(t / 700 + len(sp_tag)) + rng.uniform(-0.5, 0.5), 1)
             if sp_tag != "TempOil":
-                vals["Min" + sp_tag] = 10.0
-                vals["Max" + sp_tag] = 10.0
+                vals["Min" + sp_tag] = 20.0
+                vals["Max" + sp_tag] = 20.0
         storage.add_samples(t, vals)
         t += step
     for a, b, tag in stop_windows:

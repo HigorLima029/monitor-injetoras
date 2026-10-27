@@ -16,6 +16,7 @@ depender de uma plataforma paga.
 
 | Tela | O que mostra |
 |---|---|
+| Painel da máquina | Réplica das telas da IHM CHY (Início, Molde, Extrator, Macho, Injeção, Plast., Temp., Set rápido) com os valores reais do gateway |
 | Visão geral | Peças em 8 h, último ciclo, refugo, alarmes ativos, canhão (zona 5 → bico), ciclo e peças por hora |
 | Temperaturas | Real × programado por zona, com a faixa de tolerância da máquina; óleo hidráulico |
 | Produção | Peças por intervalo, refugo, ciclo médio, meta da ordem, fases do último ciclo, pressão e colchão |
@@ -23,6 +24,24 @@ depender de uma plataforma paga.
 | Variáveis | As ~1000 variáveis do gateway, com busca |
 
 Períodos: 1 h, 8 h, 24 h e 7 dias. Tema claro/escuro. Funciona no celular.
+
+## Painel da máquina
+
+![Réplica da tela Molde](docs/painel-molde.png)
+
+Recria as principais telas do painel CHY (layout baseado nas fotos do painel e no
+manual *Multifunctional Injection Molding Computer Operating Instructions*). Os
+valores vêm do OPC-UA e atualizam a cada poucos segundos: a tela aberta pede as
+suas variáveis em `GET /api/values`, que as inclui na leitura rápida.
+
+- Trocar de tela aqui **não** muda a tela do painel físico; nenhum valor é editável.
+- Campos com **—** existem no painel, mas o gateway não publica o dado (posições
+  em tempo real, delays, nível de acesso). Passe o mouse sobre um valor para ver
+  a variável OPC-UA de origem.
+- O número de estágios vem do byte baixo das variáveis `*StageSelect`
+  (ex.: `HoldPresStageSelect = 131074` → 2 estágios).
+- Modos com texto (ex.: `PlastMode 1 = Pos.`, `ColdMode 2 = Durant. Plast.`,
+  `EjectMode 3 = Avanç.`) foram conferidos com as fotos; outros códigos aparecem como "modo N".
 
 ## Como funciona
 
@@ -100,6 +119,7 @@ cd backend && .venv/bin/python -m pytest -q
 | `GET /api/history?tags=A,B&minutes=60` | Séries no tempo (reduzidas para ~300 pontos) |
 | `GET /api/production?hours=8` | Peças e refugo por intervalo, ciclo médio |
 | `GET /api/alarms?hours=24` | Alarmes ativos e eventos |
+| `GET /api/values?tags=A,B` | Valores atuais de tags específicas (usado pelo Painel da máquina) |
 | `GET /api/tags?q=temp` | Todas as variáveis com valor atual |
 | `WS /ws` | Valores ao vivo a cada leitura |
 
