@@ -1,0 +1,27 @@
+name: Coletor OPC-UA (Windows .exe)
+
+on:
+  push:
+    paths:
+      - "tools/coletor_opcua/**"
+      - ".github/workflows/coletor-opcua-windows.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Instalar dependencias
+        run: pip install asyncua==2.1.0 pyinstaller
+      - name: Gerar o .exe
+        run: pyinstaller --onefile --noconsole --name ColetorOPCUA tools/coletor_opcua/coletor_opcua.py
+      - name: Teste rapido (o .exe abre e responde --help)
+        run: python tools/coletor_opcua/coletor_opcua.py --help
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ColetorOPCUA-windows
+          path: dist/ColetorOPCUA.exe
