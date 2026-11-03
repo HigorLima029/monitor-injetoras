@@ -195,6 +195,7 @@ async def ws_vnc(socket: WebSocket):
     try:
         reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=10)
     except Exception as exc:
+        logging.getLogger("vnc").warning("tela ao vivo: VNC %s:%s sem resposta (%s)", host, port, type(exc).__name__)
         await socket.close(code=1011, reason=f"VNC {host}:{port} sem resposta ({type(exc).__name__})"[:120])
         return
     filt = ReadOnlyFilter()
@@ -204,8 +205,9 @@ async def ws_vnc(socket: WebSocket):
             data = await reader.read(65536)
             if not data:
                 break
-            filt.server_said(data)
-            await socket.send_bytes(data)
+            out = filt.server_filter(data)
+            if out:
+                await socket.send_bytes(out)
 
     async def navegador_para_painel():
         while True:
@@ -219,15 +221,23 @@ async def ws_vnc(socket: WebSocket):
                 await writer.drain()
 
     tasks = [asyncio.create_task(painel_para_navegador()), asyncio.create_task(navegador_para_painel())]
+    log = logging.getLogger("vnc")
+    log.info("tela ao vivo: conectado ao VNC %s:%s", host, port)
     try:
-        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for t in done:
+            if not t.cancelled() and t.exception() is not None:
+                log.warning("tela ao vivo encerrada: %s: %s", type(t.exception()).__name__, t.exception())
+        if filt.offered:
+            log.info("VNC: seguranca oferecida pelo painel %s, usada %s; toques bloqueados: %d",
+                     filt.offered, filt.security_type, filt.dropped)
     finally:
         for t in tasks:
             t.cancel()
         writer.close()
         try:
             await socket.close()
-        except RuntimeError:
+        except Exception:  # o navegador ja fechou a pagina
             pass
 
 

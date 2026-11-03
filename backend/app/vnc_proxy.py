@@ -25,20 +25,52 @@ class ReadOnlyFilter:
         self.dropped = 0
         self._sbuf = b""
         self._server_done = False
+        self.offered: list[int] = []
+        self._version_sent = False
+        self._server_version = (3, 8)
 
-    def server_said(self, data: bytes) -> None:
-        """Acompanha o comeco do que o servidor envia (na versao 3.3 e ele quem escolhe a seguranca)."""
+    SUPPORTED_SECURITY = (1, 2)  # "sem senha" e "senha VNC"
+
+    def server_filter(self, data: bytes) -> bytes:
+        """Repassa o que o painel envia. No inicio, deixa na lista de seguranca so os tipos
+        que este filtro entende (sem senha / senha VNC), para o navegador nao escolher outro
+        (ex.: Tight, VeNCrypt), cujo handshake o filtro nao saberia acompanhar.
+        A versao (12 bytes) segue na hora: o painel espera a resposta antes de mandar a lista."""
         if self._server_done:
-            return
+            return data
         self._sbuf += data
-        if len(self._sbuf) >= 16:
-            self._server_done = True
+        out = b""
+        if not self._version_sent:
+            if len(self._sbuf) < 12:
+                return b""
+            head, self._sbuf = self._sbuf[:12], self._sbuf[12:]
+            self._version_sent = True
+            out += head
             try:
-                server_version = (int(self._sbuf[4:7]), int(self._sbuf[8:11]))
+                self._server_version = (int(head[4:7]), int(head[8:11]))
             except ValueError:
-                return
-            if server_version < (3, 7) and self.security_type is None:
-                self.security_type = struct.unpack(">I", self._sbuf[12:16])[0]
+                self._server_done = True
+                return out + self._sbuf
+        b = self._sbuf
+        if self._server_version < (3, 7):  # 3.3: o servidor ja diz o tipo em 4 bytes
+            if len(b) < 4:
+                return out
+            self.security_type = struct.unpack(">I", b[:4])[0]
+            self.offered = [self.security_type]
+            self._server_done = True
+            return out + b
+        if len(b) < 1:
+            return out
+        n = b[0]
+        if n == 0:  # o painel recusou (segue o motivo em texto)
+            self._server_done = True
+            return out + b
+        if len(b) < 1 + n:
+            return out
+        self.offered = list(b[1:1 + n])
+        keep = [t for t in self.offered if t in self.SUPPORTED_SECURITY] or self.offered
+        self._server_done = True
+        return out + bytes([len(keep)]) + bytes(keep) + b[1 + n:]
 
     def feed(self, data: bytes) -> bytes:
         """Recebe bytes do navegador e devolve so o que pode seguir para o painel."""
@@ -70,7 +102,7 @@ class ReadOnlyFilter:
                     out += self.buf[:16]
                     self.buf = self.buf[16:]
                 elif self.security_type != 1:  # so "sem senha" e "senha VNC" sao aceitos
-                    raise ValueError(f"tipo de seguranca VNC nao suportado: {self.security_type}")
+                    raise ValueError(f"tipo de seguranca VNC nao suportado: {self.security_type} (painel ofereceu {self.offered})")
                 self.stage = "init"
             elif self.stage == "init":
                 if len(self.buf) < 1:

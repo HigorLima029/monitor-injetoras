@@ -199,3 +199,16 @@ def test_ws_vnc_repassa_so_visualizacao(monkeypatch):
     assert data.startswith(b"RFB 003.008\n") and b"abc" not in data
     assert b"\x05\x01\x00\x64\x00\xc8" not in data and b"\x04\x01\x00\x00\x00\x00\x00\x61" not in data
     srv.close()
+
+
+def test_vnc_so_oferece_seguranca_suportada():
+    from app.vnc_proxy import ReadOnlyFilter
+
+    f = ReadOnlyFilter()
+    # painel oferece Tight (16), senha VNC (2) e VeNCrypt (19): navegador so pode ver o 2
+    out = f.server_filter(b"RFB 003.008\n") + f.server_filter(b"\x03\x10\x02\x13")
+    assert out == b"RFB 003.008\n\x01\x02" and f.offered == [16, 2, 19]
+    assert f.server_filter(b"\x00\x01") == b"\x00\x01"  # depois do handshake passa tudo
+    f33 = ReadOnlyFilter()
+    assert f33.server_filter(b"RFB 003.003\n\x00\x00\x00\x02") == b"RFB 003.003\n\x00\x00\x00\x02"
+    assert f33.security_type == 2
