@@ -16,6 +16,7 @@ from .config import settings
 from .em63 import Em63Source
 from .sources import OpcUaSource, SimulatedSource
 from .storage import Storage
+from .vnc_proxy import ReadOnlyFilter
 from .tags import ALARM_PREFIX, BARREL_ZONES, KPI_META, alarm_label, humanize
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -60,6 +61,7 @@ def info():
         "poll_seconds": settings.poll_seconds,
         "kpi_meta": KPI_META,
         "profile": settings.profile,
+        "vnc": settings.vnc_enabled and not settings.simulate,
         "zones": [{"label": z[0], "actual": z[1], "setpoint": z[2], "min": z[3], "max": z[4]}
                   for z in _zones()],
     }
@@ -172,6 +174,61 @@ async def ws(socket: WebSocket):
         pass
     finally:
         c.unsubscribe(q)
+
+
+def _vnc_target() -> tuple[str, int]:
+    from urllib.parse import urlparse
+
+    host = settings.vnc_host or urlparse(settings.opcua_url.replace("opc.tcp://", "tcp://")).hostname or ""
+    return host, settings.vnc_port
+
+
+@app.websocket("/ws/vnc")
+async def ws_vnc(socket: WebSocket):
+    """Repassa o VNC do painel para o navegador. Teclas e cliques nunca chegam ao painel."""
+    offered = socket.headers.get("sec-websocket-protocol", "")
+    await socket.accept(subprotocol="binary" if "binary" in offered else None)
+    if not settings.vnc_enabled:
+        await socket.close(code=1008, reason="Tela ao vivo desligada (VNC_ENABLED=0)")
+        return
+    host, port = _vnc_target()
+    try:
+        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=10)
+    except Exception as exc:
+        await socket.close(code=1011, reason=f"VNC {host}:{port} sem resposta ({type(exc).__name__})"[:120])
+        return
+    filt = ReadOnlyFilter()
+
+    async def painel_para_navegador():
+        while True:
+            data = await reader.read(65536)
+            if not data:
+                break
+            filt.server_said(data)
+            await socket.send_bytes(data)
+
+    async def navegador_para_painel():
+        while True:
+            msg = await socket.receive()
+            if msg["type"] == "websocket.disconnect":
+                break
+            data = msg.get("bytes") or (msg.get("text") or "").encode("latin-1")
+            allowed = filt.feed(data)
+            if allowed:
+                writer.write(allowed)
+                await writer.drain()
+
+    tasks = [asyncio.create_task(painel_para_navegador()), asyncio.create_task(navegador_para_painel())]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    finally:
+        for t in tasks:
+            t.cancel()
+        writer.close()
+        try:
+            await socket.close()
+        except RuntimeError:
+            pass
 
 
 dist = Path(settings.frontend_dist)

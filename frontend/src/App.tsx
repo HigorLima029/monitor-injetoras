@@ -1,18 +1,20 @@
-import { AlertTriangle, Factory, LayoutDashboard, ListTree, Monitor, Moon, Package, Sun, SunMoon, Thermometer } from 'lucide-react'
+import { AlertTriangle, Factory, MonitorPlay, LayoutDashboard, ListTree, Monitor, Moon, Package, Sun, SunMoon, Thermometer } from 'lucide-react'
 import { useEffect, useState, type ReactNode } from 'react'
 import type { Info } from './api'
 import { usePoll, useLive } from './api'
 import { StateBadge } from './components/widgets'
 import { HmiPanel } from './hmi/HmiPanel'
+import { TelaAoVivo } from './TelaAoVivo'
 import { ago } from './format'
 import { AlarmsPage, Overview, ProductionPage, Temperatures, Variables, type PageProps } from './pages'
 import { useTheme, type ThemeChoice } from './theme'
 
-type PageId = 'geral' | 'painel' | 'temperaturas' | 'producao' | 'alarmes' | 'variaveis'
+type PageId = 'geral' | 'painel' | 'tela' | 'temperaturas' | 'producao' | 'alarmes' | 'variaveis'
 
 const PAGES: { id: PageId; label: string; icon: ReactNode; render: (p: PageProps) => ReactNode }[] = [
   { id: 'geral', label: 'Visão geral', icon: <LayoutDashboard size={18} />, render: (p) => <Overview {...p} /> },
   { id: 'painel', label: 'Painel da máquina', icon: <Monitor size={18} />, render: (p) => <HmiPanel status={p.live?.status ?? null} /> },
+  { id: 'tela', label: 'Tela ao vivo', icon: <MonitorPlay size={18} />, render: () => <TelaAoVivo /> },
   { id: 'temperaturas', label: 'Temperaturas', icon: <Thermometer size={18} />, render: (p) => <Temperatures {...p} /> },
   { id: 'producao', label: 'Produção', icon: <Package size={18} />, render: (p) => <ProductionPage {...p} /> },
   { id: 'alarmes', label: 'Alarmes', icon: <AlertTriangle size={18} />, render: (p) => <AlarmsPage {...p} /> },
@@ -45,7 +47,8 @@ export default function App() {
   const status = live?.status
   const activeCount = status?.active_alarms.length ?? 0
   // A réplica da tela é da IHM CHY; num painel B&R (Euromap 63) ela não se aplica.
-  const pages = info?.profile === 'em63' ? PAGES.filter((p) => p.id !== 'painel') : PAGES
+  const pages = PAGES.filter((p) =>
+    (p.id !== 'painel' || info?.profile !== 'em63') && (p.id !== 'tela' || info?.vnc === true))
   const current = pages.find((p) => p.id === page) ?? pages[0]
 
   return (

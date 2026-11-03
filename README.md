@@ -62,6 +62,13 @@ máquina (`ActStsMach = Error` vira o alarme "Máquina em erro"). A tela *Painel
 máquina* (réplica da IHM CHY) fica oculta nesse modo; os campos brutos aparecem em
 *Variáveis* como `EM63.pEm63a.*`.
 
+No lugar dela aparece a **Tela ao vivo**: a IHM real, pelo VNC do painel (porta
+5900), dentro do navegador. É **só visualização** em duas camadas: o navegador
+abre o VNC em modo `viewOnly` e o servidor do Monitor (`/ws/vnc`) lê o protocolo e
+descarta toda tecla, clique, área de transferência ou mensagem desconhecida antes
+de chegar ao painel. Se o painel pedir senha, ela é digitada na própria página e
+não fica guardada. Ajuste com `VNC_ENABLED`, `VNC_HOST` e `VNC_PORT` no `.env`.
+
 ## Como funciona
 
 ```
@@ -129,6 +136,8 @@ cd backend && .venv/bin/python -m pytest -q
 | `DB_PATH` | `data/monitor.db` | Arquivo do histórico |
 | `RETENTION_DAYS` | `7` | Dias de histórico guardados |
 | `MACHINE_PROFILE` | `chy` | `chy` (gateway CHL3200) ou `em63` (painel B&R Euromap 63) |
+| `VNC_ENABLED` | `1` no `em63` | Mostra a Tela ao vivo (VNC, só visualização) |
+| `VNC_HOST` / `VNC_PORT` | IP do OPC-UA / `5900` | Onde está o VNC do painel |
 
 ## API
 
@@ -142,6 +151,7 @@ cd backend && .venv/bin/python -m pytest -q
 | `GET /api/values?tags=A,B` | Valores atuais de tags específicas (usado pelo Painel da máquina) |
 | `GET /api/tags?q=temp` | Todas as variáveis com valor atual |
 | `WS /ws` | Valores ao vivo a cada leitura |
+| `WS /ws/vnc` | Tela do painel (VNC), só visualização |
 
 ## Observações sobre os dados
 

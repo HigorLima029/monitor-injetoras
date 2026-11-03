@@ -50,6 +50,10 @@ class Settings:
     namespace: int = int(os.getenv("OPCUA_NAMESPACE", "1"))
     # "chy" = gateway Mega CHL3200 (variaveis ns=1;s=Nome) | "em63" = painel B&R Euromap 63
     profile: str = os.getenv("MACHINE_PROFILE", "chy").strip().lower()
+    # Tela ao vivo (VNC do painel, so visualizacao). Host vazio = o mesmo do OPCUA_URL.
+    vnc_enabled: bool = _bool("VNC_ENABLED", os.getenv("MACHINE_PROFILE", "chy").strip().lower() == "em63")
+    vnc_host: str = os.getenv("VNC_HOST", "")
+    vnc_port: int = int(os.getenv("VNC_PORT", "5900"))
     frontend_dist: str = _path(os.getenv("FRONTEND_DIST", "frontend/dist"))
 
 

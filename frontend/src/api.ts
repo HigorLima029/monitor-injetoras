@@ -31,6 +31,7 @@ export interface Info {
   opcua_url: string
   simulate: boolean
   profile?: 'chy' | 'em63'
+  vnc?: boolean
   poll_seconds: number
   kpi_meta: Record<string, { label: string; unit: string; group: string }>
   zones: Zone[]

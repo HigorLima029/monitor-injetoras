@@ -351,3 +351,19 @@ tr.nonzero td.value { font-weight: 600; }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; animation: none !important; }
 }
+
+/* ---- tela ao vivo (VNC) ------------------------------------------------ */
+.btn { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--rule); background: var(--panel); border-radius: var(--radius-sm); padding: 6px 12px; cursor: pointer; font-size: 14px; }
+.btn:hover { border-color: var(--ink-3); }
+.btn.primary { background: var(--ink); color: var(--panel); border-color: var(--ink); }
+.btn:focus-visible { outline: 2px solid var(--accent, #2b7bd8); outline-offset: 2px; }
+.live-flag { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--ink-2); }
+.vnc-panel { position: relative; min-height: 420px; display: grid; place-items: center; padding: 12px; }
+.vnc-screen { width: 100%; height: calc(100vh - 230px); min-height: 380px; }
+.vnc-screen canvas { image-rendering: auto; }
+.vnc-overlay {
+  position: absolute; inset: 0; z-index: 2; display: grid; place-content: center; justify-items: center; gap: 10px;
+  text-align: center; padding: 24px; background: var(--panel); border-radius: var(--radius-lg);
+}
+.vnc-overlay input { font: inherit; padding: 8px 10px; border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--bg, transparent); color: inherit; width: 220px; }
+.vnc-overlay p { margin: 0; max-width: 52ch; }
