@@ -200,11 +200,17 @@ async def ws_vnc(socket: WebSocket):
         return
     filt = ReadOnlyFilter()
 
+    trace = {"from_panel": 0, "to_panel": 0, "panel_head": b"", "closed_by": "?"}
+
     async def painel_para_navegador():
         while True:
             data = await reader.read(65536)
             if not data:
+                trace["closed_by"] = "painel"
                 break
+            if len(trace["panel_head"]) < 120:
+                trace["panel_head"] += data[: 120 - len(trace["panel_head"])]
+            trace["from_panel"] += len(data)
             out = filt.server_filter(data)
             if out:
                 await socket.send_bytes(out)
@@ -213,10 +219,12 @@ async def ws_vnc(socket: WebSocket):
         while True:
             msg = await socket.receive()
             if msg["type"] == "websocket.disconnect":
+                trace["closed_by"] = "navegador"
                 break
             data = msg.get("bytes") or (msg.get("text") or "").encode("latin-1")
             allowed = filt.feed(data)
             if allowed:
+                trace["to_panel"] += len(allowed)
                 writer.write(allowed)
                 await writer.drain()
 
@@ -231,6 +239,11 @@ async def ws_vnc(socket: WebSocket):
         if filt.offered:
             log.info("VNC: seguranca oferecida pelo painel %s, usada %s; toques bloqueados: %d",
                      filt.offered, filt.security_type, filt.dropped)
+        log.info("VNC: sessao encerrada pelo %s; painel enviou %d bytes, navegador %d bytes; etapa do filtro: %s",
+                 trace["closed_by"], trace["from_panel"], trace["to_panel"], filt.stage)
+        head = trace["panel_head"]
+        if trace["from_panel"] < 4096:  # sessao curta: mostra o inicio da conversa (sem imagem ainda)
+            log.info("VNC: inicio da resposta do painel: %r", head[:120])
     finally:
         for t in tasks:
             t.cancel()
