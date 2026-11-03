@@ -198,7 +198,7 @@ async def ws_vnc(socket: WebSocket):
         logging.getLogger("vnc").warning("tela ao vivo: VNC %s:%s sem resposta (%s)", host, port, type(exc).__name__)
         await socket.close(code=1011, reason=f"VNC {host}:{port} sem resposta ({type(exc).__name__})"[:120])
         return
-    filt = ReadOnlyFilter()
+    filt = ReadOnlyFilter(settings.vnc_safe_encodings)
 
     trace = {"from_panel": 0, "to_panel": 0, "panel_head": b"", "closed_by": "?"}
 
@@ -211,6 +211,9 @@ async def ws_vnc(socket: WebSocket):
             if len(trace["panel_head"]) < 120:
                 trace["panel_head"] += data[: 120 - len(trace["panel_head"])]
             trace["from_panel"] += len(data)
+            if trace["from_panel"] > 100_000 and not trace.get("img"):
+                trace["img"] = True
+                log.info("VNC: imagem chegando do painel (%d bytes)", trace["from_panel"])
             out = filt.server_filter(data)
             if out:
                 await socket.send_bytes(out)
@@ -228,8 +231,8 @@ async def ws_vnc(socket: WebSocket):
                 writer.write(allowed)
                 await writer.drain()
 
-    tasks = [asyncio.create_task(painel_para_navegador()), asyncio.create_task(navegador_para_painel())]
     log = logging.getLogger("vnc")
+    tasks = [asyncio.create_task(painel_para_navegador()), asyncio.create_task(navegador_para_painel())]
     log.info("tela ao vivo: conectado ao VNC %s:%s", host, port)
     try:
         done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)

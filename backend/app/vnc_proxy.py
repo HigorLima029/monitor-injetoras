@@ -17,7 +17,7 @@ class ReadOnlyFilter:
     # tipos de mensagem do cliente (RFC 6143 + extensoes que o noVNC usa)
     PASS_FIXED = {0: 20, 3: 10, 150: 10}  # SetPixelFormat, FramebufferUpdateRequest, EnableContinuousUpdates
 
-    def __init__(self) -> None:
+    def __init__(self, safe_encodings: bool = True) -> None:
         self.buf = b""
         self.stage = "version"  # version -> security -> auth -> init -> messages
         self.version = (3, 8)
@@ -26,6 +26,8 @@ class ReadOnlyFilter:
         self._sbuf = b""
         self._server_done = False
         self.offered: list[int] = []
+        self.safe_encodings = safe_encodings
+        self.requested_encodings: list[int] = []
         self._version_sent = False
         self._server_version = (3, 8)
 
@@ -116,11 +118,22 @@ class ReadOnlyFilter:
                     break
                 kind = self.buf[0]
                 msg, self.buf = self.buf[:n], self.buf[n:]
-                if kind in (0, 2, 3, 150, 248):
+                if kind == 2 and self.safe_encodings:
+                    out += self._safe_set_encodings(msg)
+                elif kind in (0, 2, 3, 150, 248):
                     out += msg
                 else:
                     self.dropped += 1  # tecla, clique, clipboard, resolucao: descartado
         return out
+
+    # Formatos basicos que qualquer servidor VNC entende (o painel B&R trava com a lista
+    # moderna do noVNC: Tight, ZRLE, pseudo-encodings...). CopyRect=1, Raw=0, DesktopSize=-223.
+    SAFE_ENCODINGS = (1, 0, -223)
+
+    def _safe_set_encodings(self, msg: bytes) -> bytes:
+        self.requested_encodings = list(struct.unpack(f">{(len(msg) - 4) // 4}i", msg[4:]))
+        enc = self.SAFE_ENCODINGS
+        return b"\x02\x00" + struct.pack(">H", len(enc)) + struct.pack(f">{len(enc)}i", *enc)
 
     def _message_length(self) -> int | None:
         b = self.buf

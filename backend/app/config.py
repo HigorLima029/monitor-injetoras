@@ -25,7 +25,7 @@ _load_dotenv()
 
 def _bool(name: str, default: bool) -> bool:
     raw = os.getenv(name)
-    if raw is None:
+    if raw is None or not raw.strip():
         return default
     return raw.strip().lower() in {"1", "true", "sim", "yes", "on"}
 
@@ -54,6 +54,8 @@ class Settings:
     vnc_enabled: bool = _bool("VNC_ENABLED", os.getenv("MACHINE_PROFILE", "chy").strip().lower() == "em63")
     vnc_host: str = os.getenv("VNC_HOST", "")
     vnc_port: int = int(os.getenv("VNC_PORT", "5900"))
+    # 1 = pede ao painel so formatos basicos de imagem (Raw/CopyRect); paineis B&R precisam disso
+    vnc_safe_encodings: bool = _bool("VNC_SAFE_ENCODINGS", True)
     frontend_dist: str = _path(os.getenv("FRONTEND_DIST", "frontend/dist"))
 
 

@@ -212,3 +212,15 @@ def test_vnc_so_oferece_seguranca_suportada():
     f33 = ReadOnlyFilter()
     assert f33.server_filter(b"RFB 003.003\n\x00\x00\x00\x02") == b"RFB 003.003\n\x00\x00\x00\x02"
     assert f33.security_type == 2
+
+
+def test_vnc_pede_formatos_basicos():
+    import struct as st
+
+    from app.vnc_proxy import ReadOnlyFilter
+
+    f = ReadOnlyFilter()
+    enc = st.pack(">5i", 7, 16, 5, 0, -223)  # Tight, ZRLE, Hextile, Raw, DesktopSize
+    out = f.feed(b"RFB 003.008\n\x01\x01" + b"\x02\x00" + st.pack(">H", 5) + enc)
+    assert out.endswith(b"\x02\x00" + st.pack(">H", 3) + st.pack(">3i", 1, 0, -223))
+    assert f.requested_encodings == [7, 16, 5, 0, -223]
