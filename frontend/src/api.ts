@@ -30,6 +30,7 @@ export interface Info {
   machine_name: string
   opcua_url: string
   simulate: boolean
+  profile?: 'chy' | 'em63'
   poll_seconds: number
   kpi_meta: Record<string, { label: string; unit: string; group: string }>
   zones: Zone[]

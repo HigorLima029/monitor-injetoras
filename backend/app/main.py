@@ -13,6 +13,7 @@ from fastapi.staticfiles import StaticFiles
 
 from .collector import Collector, to_number
 from .config import settings
+from .em63 import Em63Source
 from .sources import OpcUaSource, SimulatedSource
 from .storage import Storage
 from .tags import ALARM_PREFIX, BARREL_ZONES, KPI_META, alarm_label, humanize
@@ -24,6 +25,8 @@ def build_collector() -> Collector:
     storage = Storage(settings.db_path)
     if settings.simulate:
         source = SimulatedSource()
+    elif settings.profile == "em63":
+        source = Em63Source(settings.opcua_url, settings.namespace if settings.namespace != 1 else 6)
     else:
         cache = str(Path(settings.db_path).with_name("tags_cache.json"))
         source = OpcUaSource(settings.opcua_url, settings.namespace, cache_file=cache)
@@ -56,9 +59,20 @@ def info():
         "simulate": settings.simulate,
         "poll_seconds": settings.poll_seconds,
         "kpi_meta": KPI_META,
+        "profile": settings.profile,
         "zones": [{"label": z[0], "actual": z[1], "setpoint": z[2], "min": z[3], "max": z[4]}
-                  for z in BARREL_ZONES],
+                  for z in _zones()],
     }
+
+
+def _zones():
+    """CHY: bico + 5 zonas fixas. B&R (Euromap 63): so as zonas ligadas no painel, sem bico."""
+    if settings.profile != "em63" or settings.simulate:
+        return BARREL_ZONES
+    zones = [z for z in BARREL_ZONES if z[0] != "Bico"]
+    vals = _c(app).values if hasattr(app.state, "collector") else {}
+    active = [z for z in zones if vals.get(z[2]) is not None]
+    return active or zones
 
 
 @app.get("/api/live")

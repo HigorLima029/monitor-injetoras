@@ -48,6 +48,8 @@ class Settings:
     db_path: str = _path(os.getenv("DB_PATH", "data/monitor.db"))
     retention_days: int = int(os.getenv("RETENTION_DAYS", "7"))
     namespace: int = int(os.getenv("OPCUA_NAMESPACE", "1"))
+    # "chy" = gateway Mega CHL3200 (variaveis ns=1;s=Nome) | "em63" = painel B&R Euromap 63
+    profile: str = os.getenv("MACHINE_PROFILE", "chy").strip().lower()
     frontend_dist: str = _path(os.getenv("FRONTEND_DIST", "frontend/dist"))
 
 

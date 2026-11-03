@@ -91,3 +91,42 @@ def test_api_com_simulador(tmp_path, monkeypatch):
         assert "Hold2Time" in col.fast_tags
         with client.websocket_connect("/ws") as ws:
             assert "status" in ws.receive_json()
+
+
+def test_le_painel_br_euromap63():
+    from app.em63 import Em63Source
+    from tests import fake_br
+
+    async def run():
+        server, nodes = await fake_br.start(4852)
+        try:
+            src = Em63Source("opc.tcp://127.0.0.1:4852")
+            await src.connect()
+            tags = await src.list_tags()
+            assert "ProductionCount" in tags and "EM63.pEm63a.myActIPAddr" in tags
+            vals = await src.read(["ProductionCount", "BadProduction", "ProductionGoodCount",
+                                   "CycleMonitor", "TempZ1", "TempZ1Now", "MaxTempZ1", "TempZ5",
+                                   "TempOilNow", "WarnMachineError", "EM63.pEm63a.myActIPAddr"])
+            assert vals["ProductionCount"] == 9283 and vals["BadProduction"] == 3
+            assert vals["ProductionGoodCount"] == 9280 and vals["CycleMonitor"] == 31.4
+            assert vals["TempZ1"] == 180.0 and vals["TempZ1Now"] == 176.5 and vals["MaxTempZ1"] == 20.0
+            assert vals["TempZ5"] is None  # zona desligada no painel
+            assert vals["TempOilNow"] == 41.0 and vals["WarnMachineError"] == 0.0
+            assert vals["EM63.pEm63a.myActIPAddr"] == "10.86.20.253"
+
+            col = Collector(src, Storage(":memory:"), poll_seconds=0.1, full_poll_seconds=999)
+            col.tags = tags
+            await col.poll_once()
+            assert col.machine_state() == "parada"
+            await nodes["pEm63m.ActStsMach"].write_value("Error")  # só o servidor de teste muda
+            await col.poll_once()
+            assert col.active_alarms == {"WarnMachineError"} and col.machine_state() == "alarme"
+            await nodes["pEm63m.ActStsMach"].write_value("Production")
+            await nodes["pEm63m.ActCntCyc"].write_value(9284)
+            await col.poll_once()
+            assert col.machine_state() == "produzindo"
+            await src.close()
+        finally:
+            await server.stop()
+
+    asyncio.run(run())

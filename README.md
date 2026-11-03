@@ -43,6 +43,25 @@ suas variáveis em `GET /api/values`, que as inclui na leitura rápida.
 - Modos com texto (ex.: `PlastMode 1 = Pos.`, `ColdMode 2 = Durant. Plast.`,
   `EjectMode 3 = Avanç.`) foram conferidos com as fotos; outros códigos aparecem como "modo N".
 
+## Painel B&R (Euromap 63)
+
+Máquinas com painel B&R (ex.: JM228) têm servidor OPC-UA próprio e publicam os
+dados no padrão **Euromap 63** (`ns=6;s=::EM63Mapp:pEm63a.*` e `pEm63m.*`). Para
+lê-las, use no `.env`:
+
+```
+MACHINE_PROFILE=em63
+OPCUA_URL=opc.tcp://10.86.20.253:4840
+```
+
+O Monitor traduz os campos para os mesmos indicadores da CHY (ciclos, refugo,
+tempo de ciclo, fases do ciclo, colchão, pressão, zonas do canhão com tolerância
+e óleo). Diferenças: só aparecem as zonas ligadas no painel, não há bico separado,
+o contador é de **ciclos** (`ActCntCyc`) e os alarmes vêm só do estado geral da
+máquina (`ActStsMach = Error` vira o alarme "Máquina em erro"). A tela *Painel da
+máquina* (réplica da IHM CHY) fica oculta nesse modo; os campos brutos aparecem em
+*Variáveis* como `EM63.pEm63a.*`.
+
 ## Como funciona
 
 ```
@@ -109,6 +128,7 @@ cd backend && .venv/bin/python -m pytest -q
 | `SIMULATE` | `0` | `1` usa o simulador no lugar do gateway |
 | `DB_PATH` | `data/monitor.db` | Arquivo do histórico |
 | `RETENTION_DAYS` | `7` | Dias de histórico guardados |
+| `MACHINE_PROFILE` | `chy` | `chy` (gateway CHL3200) ou `em63` (painel B&R Euromap 63) |
 
 ## API
 

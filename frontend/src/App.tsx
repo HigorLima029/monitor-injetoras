@@ -44,17 +44,19 @@ export default function App() {
   const go = (id: PageId) => { window.location.hash = id; setPage(id) }
   const status = live?.status
   const activeCount = status?.active_alarms.length ?? 0
-  const current = PAGES.find((p) => p.id === page) ?? PAGES[0]
+  // A réplica da tela é da IHM CHY; num painel B&R (Euromap 63) ela não se aplica.
+  const pages = info?.profile === 'em63' ? PAGES.filter((p) => p.id !== 'painel') : PAGES
+  const current = pages.find((p) => p.id === page) ?? pages[0]
 
   return (
     <div className="shell">
       <nav className="rail" aria-label="Seções">
         <div className="brand">
           <Factory size={26} aria-hidden="true" />
-          <div><strong>Monitor de Injetoras</strong><span>OPC-UA · gateway Mega</span></div>
+          <div><strong>Monitor de Injetoras</strong><span>{info?.profile === 'em63' ? 'OPC-UA · painel B&R' : 'OPC-UA · gateway Mega'}</span></div>
         </div>
         <div className="nav">
-          {PAGES.map((p) => (
+          {pages.map((p) => (
             <button key={p.id} aria-current={page === p.id ? 'page' : undefined} onClick={() => go(p.id)}>
               {p.icon}{p.label}
               {p.id === 'alarmes' && activeCount > 0 && <span className="count" aria-label={`${activeCount} ativos`}>{activeCount}</span>}

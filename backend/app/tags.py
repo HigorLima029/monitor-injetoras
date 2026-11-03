@@ -126,6 +126,7 @@ ALARM_LABELS: dict[str, str] = {
     "WarnBackPressureTooHigh": "Contrapressão alta",
     "WarnAccChargeAlarm": "Alarme de carga do acumulador",
     "WarnHydraulicClampError": "Erro no fechamento hidráulico",
+    "WarnMachineError": "Máquina em erro (estado Euromap 63)",
 }
 
 
