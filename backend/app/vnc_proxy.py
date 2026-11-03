@@ -29,6 +29,7 @@ class ReadOnlyFilter:
         self.safe_encodings = safe_encodings
         self.requested_encodings: list[int] = []
         self._version_sent = False
+        self.translate33 = False
         self._server_version = (3, 8)
 
     SUPPORTED_SECURITY = (1, 2)  # "sem senha" e "senha VNC"
@@ -47,20 +48,30 @@ class ReadOnlyFilter:
                 return b""
             head, self._sbuf = self._sbuf[:12], self._sbuf[12:]
             self._version_sent = True
-            out += head
             try:
                 self._server_version = (int(head[4:7]), int(head[8:11]))
             except ValueError:
                 self._server_done = True
-                return out + self._sbuf
+                return head + self._sbuf
+            if self._server_version < (3, 7):
+                # Painel antigo (3.3, como o B&R). O noVNC 1.4 erra a 3.3 com senha VNC (ignora o
+                # "senha OK" e le a tela como 0x0); entao o navegador conversa em 3.8 e a ponte traduz.
+                self.translate33 = True
+                head = b"RFB 003.008\n"
+            out += head
         b = self._sbuf
         if self._server_version < (3, 7):  # 3.3: o servidor ja diz o tipo em 4 bytes
             if len(b) < 4:
                 return out
-            self.security_type = struct.unpack(">I", b[:4])[0]
-            self.offered = [self.security_type]
+            t = struct.unpack(">I", b[:4])[0]
+            self.security_type = t
+            self.offered = [t]
             self._server_done = True
-            return out + b
+            if t == 0:  # recusa: na 3.8 e "0 tipos" + motivo (mesmo formato do motivo)
+                return out + b"\x00" + b[4:]
+            if t == 1:  # sem senha: a 3.8 espera um "OK" que a 3.3 nao manda
+                return out + b"\x01\x01" + b"\x00\x00\x00\x00" + b[4:]
+            return out + b"\x01" + bytes([t & 0xFF]) + b[4:]
         if len(b) < 1:
             return out
         n = b[0]
@@ -86,13 +97,17 @@ class ReadOnlyFilter:
                 if not chunk.startswith(b"RFB "):
                     raise ValueError("handshake VNC invalido")
                 self.version = (int(chunk[4:7]), int(chunk[8:11]))
-                out += chunk
+                out += b"RFB 003.003\n" if self.translate33 else chunk
                 self.stage = "security" if self.version >= (3, 7) else "auth"
             elif self.stage == "security":
                 if len(self.buf) < 1:
                     break
-                self.security_type = self.buf[0]
-                out += self.buf[:1]
+                if self.translate33:  # na 3.3 o cliente nao escolhe: a escolha do navegador fica aqui
+                    if self.security_type is None:
+                        break
+                else:
+                    self.security_type = self.buf[0]
+                    out += self.buf[:1]
                 self.buf = self.buf[1:]
                 self.stage = "auth"
             elif self.stage == "auth":

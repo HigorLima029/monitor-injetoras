@@ -209,9 +209,13 @@ def test_vnc_so_oferece_seguranca_suportada():
     out = f.server_filter(b"RFB 003.008\n") + f.server_filter(b"\x03\x10\x02\x13")
     assert out == b"RFB 003.008\n\x01\x02" and f.offered == [16, 2, 19]
     assert f.server_filter(b"\x00\x01") == b"\x00\x01"  # depois do handshake passa tudo
+    # painel 3.3 com senha VNC (B&R): o navegador ve 3.8 e o painel continua em 3.3
     f33 = ReadOnlyFilter()
-    assert f33.server_filter(b"RFB 003.003\n\x00\x00\x00\x02") == b"RFB 003.003\n\x00\x00\x00\x02"
-    assert f33.security_type == 2
+    assert f33.server_filter(b"RFB 003.003\n") == b"RFB 003.008\n"
+    assert f33.feed(b"RFB 003.008\n") == b"RFB 003.003\n"
+    assert f33.server_filter(b"\x00\x00\x00\x02" + b"C" * 16) == b"\x01\x02" + b"C" * 16
+    assert f33.feed(b"\x02" + b"R" * 16 + b"\x00") == b"R" * 16 + b"\x01"  # escolha some, ClientInit vai
+    assert f33.server_filter(b"\x00\x00\x00\x00") == b"\x00\x00\x00\x00"  # "senha OK" segue
 
 
 def test_vnc_pede_formatos_basicos():
