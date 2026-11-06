@@ -361,6 +361,10 @@ tr.nonzero td.value { font-weight: 600; }
 .vnc-panel { position: relative; min-height: 420px; display: grid; place-items: center; padding: 12px; }
 .vnc-screen { width: 100%; height: calc(100vh - 230px); min-height: 380px; }
 .vnc-screen canvas { image-rendering: auto; }
+/* o noVNC esconde o cursor local e espera o desenho do cursor do painel, que o B&R nao manda:
+   sem isto o mouse "some" em cima da tela. Mira ao operar, seta normal ao so assistir. */
+.vnc-screen canvas { cursor: default !important; }
+.vnc-panel.operando .vnc-screen canvas { cursor: crosshair !important; }
 .vnc-overlay {
   position: absolute; inset: 0; z-index: 2; display: grid; place-content: center; justify-items: center; gap: 10px;
   text-align: center; padding: 24px; background: var(--panel); border-radius: var(--radius-lg);
