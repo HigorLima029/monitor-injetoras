@@ -71,7 +71,11 @@ export default function App() {
             {choice === 'dark' ? <Moon size={15} /> : choice === 'light' ? <Sun size={15} /> : <SunMoon size={15} />}
             {THEME_TEXT[choice]}
           </button>
-          <span>Somente leitura: este painel nunca altera a máquina.</span>
+          <span>
+            {info?.vnc_control
+              ? 'Dados só leitura. Operar a tela exige a senha de operação, um operador por vez.'
+              : 'Somente leitura: este painel nunca altera a máquina.'}
+          </span>
         </div>
       </nav>
 

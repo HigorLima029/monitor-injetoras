@@ -50,12 +50,20 @@ class Settings:
     namespace: int = int(os.getenv("OPCUA_NAMESPACE", "1"))
     # "chy" = gateway Mega CHL3200 (variaveis ns=1;s=Nome) | "em63" = painel B&R Euromap 63
     profile: str = os.getenv("MACHINE_PROFILE", "chy").strip().lower()
-    # Tela ao vivo (VNC do painel, so visualizacao). Host vazio = o mesmo do OPCUA_URL.
+    # Tela ao vivo (VNC do painel). Host vazio = o mesmo do OPCUA_URL.
     vnc_enabled: bool = _bool("VNC_ENABLED", os.getenv("MACHINE_PROFILE", "chy").strip().lower() == "em63")
     vnc_host: str = os.getenv("VNC_HOST", "")
     vnc_port: int = int(os.getenv("VNC_PORT", "5900"))
-    # 1 = pede ao painel so formatos basicos de imagem (Raw/CopyRect); paineis B&R precisam disso
-    vnc_safe_encodings: bool = _bool("VNC_SAFE_ENCODINGS", True)
+    # As duas senhas VNC do painel: a de visualizacao so assiste; a de operacao pode assumir o controle.
+    # Ficam so no servidor (.env); o navegador nunca recebe. Operacao vazia = ninguem opera.
+    vnc_view_password: str = os.getenv("VNC_VIEW_PASSWORD", "")
+    vnc_control_password: str = os.getenv("VNC_CONTROL_PASSWORD", "")
+    # segundos sem mexer ate o operador perder o controle
+    vnc_control_timeout: float = float(os.getenv("VNC_CONTROL_TIMEOUT", "300"))
+    # porta VNC comum do hub, para o Espelho IHM ou outro cliente VNC (0 = desligada)
+    vnc_tcp_port: int = int(os.getenv("VNC_TCP_PORT", "5901"))
+    vnc_tcp_bind: str = os.getenv("VNC_TCP_BIND", "0.0.0.0")
+    vnc_audit_path: str | None = _path(os.getenv("VNC_AUDIT_PATH", "data/vnc_audit.log"))
     frontend_dist: str = _path(os.getenv("FRONTEND_DIST", "frontend/dist"))
 
 

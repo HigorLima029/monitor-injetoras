@@ -63,11 +63,45 @@ máquina* (réplica da IHM CHY) fica oculta nesse modo; os campos brutos aparece
 *Variáveis* como `EM63.pEm63a.*`.
 
 No lugar dela aparece a **Tela ao vivo**: a IHM real, pelo VNC do painel (porta
-5900), dentro do navegador. É **só visualização** em duas camadas: o navegador
-abre o VNC em modo `viewOnly` e o servidor do Monitor (`/ws/vnc`) lê o protocolo e
-descarta toda tecla, clique, área de transferência ou mensagem desconhecida antes
-de chegar ao painel. Se o painel pedir senha, ela é digitada na própria página e
-não fica guardada. Ajuste com `VNC_ENABLED`, `VNC_HOST` e `VNC_PORT` no `.env`.
+5900), dentro do navegador.
+
+### Tela ao vivo: várias pessoas assistindo, um operador por vez
+
+O painel B&R aceita **um cliente VNC só**. Por isso o Monitor é esse cliente (o
+*hub*, `backend/app/vnc_hub.py`): ele mantém uma conexão com o painel, guarda a
+imagem e a repassa para quantas pessoas quiserem assistir, pelo navegador ou por um
+cliente VNC comum, como o Espelho IHM, na porta `VNC_TCP_PORT` (5901).
+
+A senha digitada define o papel, como no Espelho:
+
+| Senha | O que a pessoa pode fazer |
+| --- | --- |
+| `VNC_VIEW_PASSWORD` (visualização) | Só assiste |
+| `VNC_CONTROL_PASSWORD` (operação) | Assiste e pode **assumir o controle** |
+
+Regras de segurança:
+
+- **Enquanto ninguém opera, o hub fica ligado ao painel com a senha de
+  visualização**: o próprio painel recusa qualquer toque.
+- **Um operador por vez.** No navegador, o operador clica em *Assumir controle* e
+  confirma. O hub reconecta no painel com a senha de operação (a tela congela 1 a 2 s)
+  e só então repassa cliques e teclas, e **só dessa pessoa**. Num cliente VNC comum,
+  o primeiro toque de quem entrou com a senha de operação assume o controle.
+- Teclas e cliques de quem só assiste são descartados no servidor. A área de
+  transferência nunca vai para o painel.
+- **O controle volta sozinho** para visualização depois de `VNC_CONTROL_TIMEOUT`
+  segundos sem uso (padrão 300), ou quando o operador libera ou fecha a página.
+- Entradas, saídas e trocas de controle ficam em `VNC_AUDIT_PATH`
+  (`data/vnc_audit.log`).
+- As senhas ficam só no `.env` do servidor; o navegador nunca as recebe. Sem
+  `VNC_VIEW_PASSWORD`, a Tela ao vivo fica desligada.
+- Quando ninguém está assistindo, o hub solta o painel depois de alguns segundos.
+
+Com o Monitor ligado, **aponte o Espelho IHM para o Monitor** (`<IP do Monitor>:5901`),
+não direto no painel: se outro cliente se conectar direto, o painel derruba um dos dois.
+
+Os dados de produção (OPC-UA) continuam **só leitura**: o controle remoto vale só
+para a tela, e só com a senha de operação.
 
 ## Como funciona
 
@@ -136,8 +170,13 @@ cd backend && .venv/bin/python -m pytest -q
 | `DB_PATH` | `data/monitor.db` | Arquivo do histórico |
 | `RETENTION_DAYS` | `7` | Dias de histórico guardados |
 | `MACHINE_PROFILE` | `chy` | `chy` (gateway CHL3200) ou `em63` (painel B&R Euromap 63) |
-| `VNC_ENABLED` | `1` no `em63` | Mostra a Tela ao vivo (VNC, só visualização) |
+| `VNC_ENABLED` | `1` no `em63` | Mostra a Tela ao vivo (VNC do painel) |
 | `VNC_HOST` / `VNC_PORT` | IP do OPC-UA / `5900` | Onde está o VNC do painel |
+| `VNC_VIEW_PASSWORD` | vazio | Senha VNC de visualização do painel (obrigatória para a Tela ao vivo) |
+| `VNC_CONTROL_PASSWORD` | vazio | Senha VNC de operação (vazia = ninguém opera) |
+| `VNC_CONTROL_TIMEOUT` | `300` | Segundos sem uso até o controle voltar a só visualização |
+| `VNC_TCP_PORT` | `5901` | Porta VNC comum do Monitor para o Espelho IHM (`0` desliga) |
+| `VNC_AUDIT_PATH` | `data/vnc_audit.log` | Registro de quem entrou e operou |
 
 ## API
 
@@ -149,6 +188,8 @@ cd backend && .venv/bin/python -m pytest -q
 | `GET /api/production?hours=8` | Peças e refugo por intervalo, ciclo médio |
 | `GET /api/alarms?hours=24` | Alarmes ativos e eventos |
 | `GET /api/values?tags=A,B` | Valores atuais de tags específicas (usado pelo Painel da máquina) |
+| `GET /api/vnc/status?sid=…` | Papel da sessão, quem está operando, tempo restante |
+| `POST /api/vnc/control` | `{"sid", "action": "take" \| "release"}`: assumir ou liberar o controle |
 | `GET /api/tags?q=temp` | Todas as variáveis com valor atual |
 | `WS /ws` | Valores ao vivo a cada leitura |
 | `WS /ws/vnc` | Tela do painel (VNC), só visualização |

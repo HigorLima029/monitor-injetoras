@@ -367,3 +367,12 @@ tr.nonzero td.value { font-weight: 600; }
 }
 .vnc-overlay input { font: inherit; padding: 8px 10px; border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--bg, transparent); color: inherit; width: 220px; }
 .vnc-overlay p { margin: 0; max-width: 52ch; }
+.vnc-bar {
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; padding: 10px 14px;
+  border: 1px solid var(--rule); border-radius: var(--radius-sm); background: var(--panel); font-size: 14px;
+}
+.vnc-bar .spacer { flex: 1; }
+.vnc-bar.warn { border-color: var(--warning); background: color-mix(in srgb, var(--warning) 14%, var(--panel)); color: var(--ink); }
+.vnc-bar.warn svg { color: var(--warning-ink); }
+.vnc-panel.operando { outline: 3px solid var(--warning); outline-offset: -3px; }
+.btn:disabled { opacity: .6; cursor: default; }

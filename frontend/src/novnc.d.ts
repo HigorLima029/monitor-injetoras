@@ -6,6 +6,7 @@ declare module '@novnc/novnc/lib/rfb' {
     resizeSession: boolean
     background: string
     disconnect(): void
+    focus(): void
     sendCredentials(credentials: { username?: string; password?: string; target?: string }): void
   }
 }

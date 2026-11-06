@@ -7,16 +7,17 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Query, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from .collector import Collector, to_number
 from .config import settings
 from .em63 import Em63Source
 from .sources import OpcUaSource, SimulatedSource
 from .storage import Storage
-from .vnc_proxy import ReadOnlyFilter
+from .vnc_hub import VncHub, WebSocketTransport
 from .tags import ALARM_PREFIX, BARREL_ZONES, KPI_META, alarm_label, humanize
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -40,9 +41,31 @@ async def lifespan(app: FastAPI):
     collector = app.state.collector if hasattr(app.state, "collector") else build_collector()
     app.state.collector = collector
     collector.start()
+    hub = build_vnc_hub()
+    app.state.vnc_hub = hub
+    if hub is not None and settings.vnc_tcp_port:
+        try:
+            await hub.start_tcp(settings.vnc_tcp_bind, settings.vnc_tcp_port)
+        except OSError as exc:
+            logging.getLogger("vnc").warning("porta VNC %s indisponivel (%s)", settings.vnc_tcp_port, exc)
     yield
+    if hub is not None:
+        await hub.close()
     await collector.stop()
     collector.storage.close()
+
+
+def build_vnc_hub() -> VncHub | None:
+    """Tela ao vivo: so com VNC ligado, fora do modo simulado e com a senha de visualizacao."""
+    if not settings.vnc_enabled or settings.simulate:
+        return None
+    if not settings.vnc_view_password:
+        logging.getLogger("vnc").warning("Tela ao vivo desligada: defina VNC_VIEW_PASSWORD no .env")
+        return None
+    host, port = _vnc_target()
+    return VncHub(host, port, settings.vnc_view_password, settings.vnc_control_password,
+                  control_timeout=settings.vnc_control_timeout, name=settings.machine_name,
+                  audit_path=settings.vnc_audit_path)
 
 
 app = FastAPI(title="Monitor de Injetoras", lifespan=lifespan)
@@ -62,6 +85,7 @@ def info():
         "kpi_meta": KPI_META,
         "profile": settings.profile,
         "vnc": settings.vnc_enabled and not settings.simulate,
+        "vnc_control": bool(settings.vnc_control_password) and settings.vnc_enabled and not settings.simulate,
         "zones": [{"label": z[0], "actual": z[1], "setpoint": z[2], "min": z[3], "max": z[4]}
                   for z in _zones()],
     }
@@ -184,77 +208,47 @@ def _vnc_target() -> tuple[str, int]:
 
 
 @app.websocket("/ws/vnc")
-async def ws_vnc(socket: WebSocket):
-    """Repassa o VNC do painel para o navegador. Teclas e cliques nunca chegam ao painel."""
+async def ws_vnc(socket: WebSocket, sid: str = Query("", max_length=64)):
+    """Tela ao vivo pelo hub VNC: a senha digitada define se a pessoa so assiste ou pode operar."""
     offered = socket.headers.get("sec-websocket-protocol", "")
     await socket.accept(subprotocol="binary" if "binary" in offered else None)
-    if not settings.vnc_enabled:
-        await socket.close(code=1008, reason="Tela ao vivo desligada (VNC_ENABLED=0)")
+    hub: VncHub | None = getattr(app.state, "vnc_hub", None)
+    if hub is None:
+        reason = "Tela ao vivo desligada (VNC_ENABLED=0)" if not settings.vnc_enabled else "Defina VNC_VIEW_PASSWORD no .env"
+        await socket.close(code=1008, reason=reason)
         return
-    host, port = _vnc_target()
-    try:
-        reader, writer = await asyncio.wait_for(asyncio.open_connection(host, port), timeout=10)
-    except Exception as exc:
-        logging.getLogger("vnc").warning("tela ao vivo: VNC %s:%s sem resposta (%s)", host, port, type(exc).__name__)
-        await socket.close(code=1011, reason=f"VNC {host}:{port} sem resposta ({type(exc).__name__})"[:120])
-        return
-    filt = ReadOnlyFilter(settings.vnc_safe_encodings)
+    peer = socket.client.host if socket.client else "navegador"
+    await hub.serve(WebSocketTransport(socket), sid or f"ws-{id(socket):x}", peer)
 
-    trace = {"from_panel": 0, "to_panel": 0, "panel_head": b"", "closed_by": "?"}
 
-    async def painel_para_navegador():
-        while True:
-            data = await reader.read(65536)
-            if not data:
-                trace["closed_by"] = "painel"
-                break
-            if len(trace["panel_head"]) < 120:
-                trace["panel_head"] += data[: 120 - len(trace["panel_head"])]
-            trace["from_panel"] += len(data)
-            if trace["from_panel"] > 100_000 and not trace.get("img"):
-                trace["img"] = True
-                log.info("VNC: imagem chegando do painel (%d bytes)", trace["from_panel"])
-            out = filt.server_filter(data)
-            if out:
-                await socket.send_bytes(out)
+class VncControl(BaseModel):
+    sid: str
+    action: str  # "take" | "release"
 
-    async def navegador_para_painel():
-        while True:
-            msg = await socket.receive()
-            if msg["type"] == "websocket.disconnect":
-                trace["closed_by"] = "navegador"
-                break
-            data = msg.get("bytes") or (msg.get("text") or "").encode("latin-1")
-            allowed = filt.feed(data)
-            if allowed:
-                trace["to_panel"] += len(allowed)
-                writer.write(allowed)
-                await writer.drain()
 
-    log = logging.getLogger("vnc")
-    tasks = [asyncio.create_task(painel_para_navegador()), asyncio.create_task(navegador_para_painel())]
-    log.info("tela ao vivo: conectado ao VNC %s:%s", host, port)
-    try:
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for t in done:
-            if not t.cancelled() and t.exception() is not None:
-                log.warning("tela ao vivo encerrada: %s: %s", type(t.exception()).__name__, t.exception())
-        if filt.offered:
-            log.info("VNC: seguranca oferecida pelo painel %s, usada %s; toques bloqueados: %d",
-                     filt.offered, filt.security_type, filt.dropped)
-        log.info("VNC: sessao encerrada pelo %s; painel enviou %d bytes, navegador %d bytes; etapa do filtro: %s",
-                 trace["closed_by"], trace["from_panel"], trace["to_panel"], filt.stage)
-        head = trace["panel_head"]
-        if trace["from_panel"] < 4096:  # sessao curta: mostra o inicio da conversa (sem imagem ainda)
-            log.info("VNC: inicio da resposta do painel: %r", head[:120])
-    finally:
-        for t in tasks:
-            t.cancel()
-        writer.close()
-        try:
-            await socket.close()
-        except Exception:  # o navegador ja fechou a pagina
-            pass
+def _hub_or_404() -> VncHub:
+    hub = getattr(app.state, "vnc_hub", None)
+    if hub is None:
+        raise HTTPException(404, "Tela ao vivo desligada")
+    return hub
+
+
+@app.get("/api/vnc/status")
+def vnc_status(sid: str = Query("", max_length=64)):
+    return _hub_or_404().status(sid)
+
+
+@app.post("/api/vnc/control")
+async def vnc_control(body: VncControl):
+    hub = _hub_or_404()
+    if body.action == "take":
+        ok, msg = await hub.take(body.sid)
+        if not ok:
+            raise HTTPException(403 if "visualizacao" in msg or "desligada" in msg else 409, msg)
+        return {"ok": True, "message": msg}
+    if body.action == "release":
+        return {"ok": await hub.release(body.sid, "liberado pelo operador")}
+    raise HTTPException(400, "acao invalida")
 
 
 dist = Path(settings.frontend_dist)

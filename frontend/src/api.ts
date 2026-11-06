@@ -32,6 +32,7 @@ export interface Info {
   simulate: boolean
   profile?: 'chy' | 'em63'
   vnc?: boolean
+  vnc_control?: boolean
   poll_seconds: number
   kpi_meta: Record<string, { label: string; unit: string; group: string }>
   zones: Zone[]
@@ -72,6 +73,16 @@ export interface TagRow {
   label: string
   value: number | string | null
   unit: string
+}
+
+export interface VncStatus {
+  panel: { state: 'idle' | 'connecting' | 'connected' | 'error'; mode: 'view' | 'control'; error: string | null }
+  viewers: number
+  role: 'view' | 'control' | null
+  control_available: boolean
+  timeout: number
+  controller: { me: boolean; peer: string; since: number | null; seconds_left: number } | null
+  events?: { time: number; text: string }[]
 }
 
 export async function getJson<T>(url: string): Promise<T> {
