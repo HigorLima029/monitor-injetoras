@@ -42,6 +42,9 @@ ZONE_ARRAYS = {
     "pEm63a.SetTmpBrlZnLdev": "low",
     "pEm63a.SetTmpBrlZnHdev": "high",
 }
+# Tempos de fase "my*" (fechamento, abertura, resfriamento, extracao): em alguns paineis vem em
+# milissegundos (JM208MK6, software V1.58: fechamento 1220 = 1,22 s), em outros pode vir em segundos.
+PHASE_FIELDS = ["pEm63a.myActTimCool", "pEm63a.myActTimMldCls", "pEm63a.myActTimMldOpn", "pEm63a.myActTimEject"]
 STATUS_FIELDS = ["pEm63m.ActStsMach", "pEm63m.ActStsCyc", "pEm63m.SetCntCyc", "pEm63m.ActDescJob"]
 MAX_ZONES = 5  # o painel do Monitor tem Zona 1..5
 
@@ -57,12 +60,30 @@ def _num(v):
         return None
 
 
+def _phases_to_seconds(raw: dict[str, object], out: dict[str, object]) -> None:
+    """Converte os tempos de fase para segundos quando o painel manda em milissegundos.
+
+    Compara com o tempo total do ciclo (sempre em segundos no Euromap 63): se a soma das fases
+    passa de 5x o ciclo, so pode estar em ms. Sem ciclo conhecido, uma fase acima de 300 "s" tambem.
+    """
+    phases = {f: SIMPLE[f] for f in PHASE_FIELDS if f in raw and out.get(SIMPLE[f]) is not None}
+    if not phases:
+        return
+    values = [out[t] for t in phases.values()]
+    cycle = out.get("CycleMonitor") or 0
+    in_ms = sum(values) > 5 * cycle if cycle > 0 else max(values) > 300
+    if in_ms:
+        for tag in phases.values():
+            out[tag] = round(out[tag] / 1000.0, 3)
+
+
 def translate(raw: dict[str, object]) -> dict[str, object]:
     """Converte os campos Euromap 63 lidos para as tags internas do Monitor."""
     out: dict[str, object] = {}
     for field, tag in SIMPLE.items():
         if field in raw:
             out[tag] = _num(raw[field])
+    _phases_to_seconds(raw, out)
     count, bad = out.get("ProductionCount"), out.get("BadProduction")
     if count is not None:
         out["DefectCount"] = bad

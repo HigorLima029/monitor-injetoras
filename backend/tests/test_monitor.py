@@ -132,3 +132,17 @@ def test_le_painel_br_euromap63():
     asyncio.run(run())
 
 
+
+
+def test_fases_em_milissegundos_viram_segundos():
+    from app.em63 import translate
+
+    # JM208MK6 (software V1.58): fases em ms, ciclo em s
+    ms = translate({"pEm63a.ActTimCyc": 2.8, "pEm63a.myActTimMldCls": 1220, "pEm63a.myActTimMldOpn": 1600,
+                    "pEm63a.myActTimCool": 0, "pEm63a.myActTimEject": 0})
+    assert ms["ClampLastTime"] == 1.22 and ms["OpenLastTime"] == 1.6 and ms["ColdLastTime"] == 0
+    # painel que já manda em segundos fica como está
+    s = translate({"pEm63a.ActTimCyc": 31.4, "pEm63a.myActTimMldCls": 2.1, "pEm63a.myActTimCool": 12.0})
+    assert s["ClampLastTime"] == 2.1 and s["ColdLastTime"] == 12.0
+    # sem ciclo conhecido: valores enormes só podem ser ms
+    assert translate({"pEm63a.myActTimMldOpn": 1620})["OpenLastTime"] == 1.62
