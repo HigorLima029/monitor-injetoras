@@ -146,3 +146,40 @@ def test_fases_em_milissegundos_viram_segundos():
     assert s["ClampLastTime"] == 2.1 and s["ColdLastTime"] == 12.0
     # sem ciclo conhecido: valores enormes só podem ser ms
     assert translate({"pEm63a.myActTimMldOpn": 1620})["OpenLastTime"] == 1.62
+
+
+def test_leitura_travada_vira_sem_conexao_e_reconecta():
+    class Travada:
+        def __init__(self):
+            self.conexoes = 0
+            self.trava = True
+
+        async def connect(self):
+            self.conexoes += 1
+
+        async def close(self):
+            pass
+
+        async def list_tags(self):
+            return ["ProductionCount"]
+
+        async def read(self, tags):
+            if self.trava and self.conexoes == 1:
+                await asyncio.sleep(3600)  # conexão que caiu "em silêncio"
+            return {"ProductionCount": 1.0}
+
+    async def run():
+        src = Travada()
+        col = Collector(src, Storage(":memory:"), poll_seconds=0.05, read_timeout=0.2)
+        col.last_ok = time.time() - 120  # leitura antiga: sem leitura nova, não pode dizer "parada"
+        col.connected = True
+        assert col.machine_state() == "offline" and col.status()["connected"] is False
+        col.last_ok = None
+        col.start()
+        await asyncio.sleep(0.5)
+        assert "não respondeu" in (col.last_error or "")
+        await asyncio.sleep(5.5)  # espera de 5 s antes de reconectar
+        assert src.conexoes >= 2 and col.connected and col.machine_state() != "offline"
+        await col.stop()
+
+    asyncio.run(run())

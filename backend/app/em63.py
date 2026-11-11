@@ -187,12 +187,14 @@ class Em63Source:
             chunk = fields[i:i + self.CHUNK]
             try:
                 values = await self._client.read_values([self._node(f) for f in chunk])
-            except Exception:
+            except ua.UaStatusCodeError:
+                # algum campo que o painel recusa: le um por um. Erro de rede (timeout, conexao
+                # fechada) sobe direto, senao seriam dezenas de esperas de 30 s seguidas.
                 values = []
                 for f in chunk:
                     try:
                         values.append(await self._node(f).read_value())
-                    except Exception:
+                    except ua.UaStatusCodeError:
                         values.append(None)
             out.update(zip(chunk, values))
         return out

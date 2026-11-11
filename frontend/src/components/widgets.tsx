@@ -133,6 +133,10 @@ export function CycleBreakdown({ live, colors }: { live: Live | null; colors: Re
   const v = live?.values ?? {}
   const parts = CYCLE_PHASES.map((p) => ({ ...p, s: num(v[p.tag]) ?? 0 }))
   const total = parts.reduce((a, p) => a + p.s, 0)
+  // O que o ciclo tem a mais que a soma das fases (ex.: travamento que o painel não informa em fase nenhuma).
+  // Se as fases somam mais que o ciclo (dosagem junto do resfriamento), não há sobra a mostrar.
+  const cycle = num(v.CycleMonitor) ?? 0
+  const rest = cycle - total >= 0.05 ? cycle - total : 0
   if (total <= 0) {
     return <div className="empty-chart" style={{ height: 120 }}>As fases do ciclo aparecem depois do primeiro ciclo completo.</div>
   }
@@ -143,6 +147,9 @@ export function CycleBreakdown({ live, colors }: { live: Live | null; colors: Re
           <div key={p.tag} title={`${p.label}: ${fmt(p.s, 2)} s`}
             style={{ flex: p.s, background: colors[p.color] }} />
         ))}
+        {rest > 0 && (
+          <div className="nao-medido" title={`Não medido: ${fmt(rest, 2)} s`} style={{ flex: rest }} />
+        )}
       </div>
       <div className="cycle-list">
         {parts.map((p) => (
@@ -152,6 +159,13 @@ export function CycleBreakdown({ live, colors }: { live: Live | null; colors: Re
             <b>{fmt(p.s, 2)} s</b>
           </div>
         ))}
+        {rest > 0 && (
+          <div title="Parte do ciclo que o painel não atribui a nenhuma fase">
+            <i className="nao-medido" />
+            Não medido
+            <b>{fmt(rest, 2)} s</b>
+          </div>
+        )}
       </div>
     </div>
   )
