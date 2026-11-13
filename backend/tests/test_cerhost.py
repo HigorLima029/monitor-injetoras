@@ -8,6 +8,10 @@ import os
 import signal
 import stat
 import struct
+import subprocess
+import sys
+import time
+from pathlib import Path
 
 from app import cerhost
 from app.cerhost import CerhostBridge, missing_tools
@@ -16,7 +20,8 @@ MAIN = "Remote Display Control for Windows CE"
 PANEL = "CP-72B8D3"
 HOST = "10.86.20.186"
 VIEW, CONTROL = "olhar", "operar"
-MAIN_WID, IME_WID = "4194305", "4194306"
+MAIN_WID, IME_WID, DIALOG_WID = "4194305", "4194306", "4194320"
+DIALOG = "Connect"
 _pids = itertools.count(5000)
 
 
@@ -37,7 +42,9 @@ class FakeRunner:
     """Registra os comandos e simula as janelas do CERHost vistas pelo xdotool.
 
     `windows` sao as janelas do processo do CERHost (wid -> titulo); `foreign` sao janelas de
-    outros processos na mesma tela (nao contam).
+    outros processos na mesma tela (nao contam). Como na bancada: alt+f abre o menu, o primeiro
+    Return abre o dialogo de conexao (outra janela do processo, que pega o foco), o IP e digitado
+    nele e o Return final fecha o dialogo e conecta.
     """
 
     def __init__(self, connects: bool = True):
@@ -54,7 +61,11 @@ class FakeRunner:
         self.active: str | None = None     # janela ativa (None = principal do CERHost)
         self.hooks: dict[tuple, callable] = {}
         self.spawn_delay: dict[str, float] = {}
+        self.stderr_paths: dict[str, str | None] = {}
+        self.dialog_takes_focus = True
         self._typed = False
+        self._menu = False
+        self._focus = MAIN_WID
 
     def procs(self, name: str) -> list[FakeProc]:
         return [p for p in self.spawned if p.argv[0] == name]
@@ -68,12 +79,14 @@ class FakeRunner:
         if sig == signal.SIGKILL or not proc.stubborn:
             proc.returncode = -sig
 
-    async def spawn(self, argv, env):
+    async def spawn(self, argv, env, stderr_path=None):
         p = FakeProc(list(argv))
         self.spawned.append(p)
         self.envs.append(dict(env))
+        self.stderr_paths[argv[0]] = stderr_path
         if argv[0] == "wine":
             self.windows = {MAIN_WID: MAIN, IME_WID: "Default IME"}
+            self._focus, self._menu, self._typed = MAIN_WID, False, False
         if argv[0] == "x11vnc":
             path = argv[argv.index("-passwdfile") + 1].removeprefix("rm:")
             with open(path, encoding="utf-8") as fh:
@@ -102,17 +115,27 @@ class FakeRunner:
         if argv[:2] == ["xdotool", "getwindowname"]:
             return 0, {**self.windows, **self.foreign}.get(argv[2], "") + "\n"
         if argv[:2] == ["xdotool", "getactivewindow"]:
-            return 0, (self.active or MAIN_WID) + "\n"
+            return 0, (self.active or self._focus) + "\n"
         if argv[:2] == ["xdotool", "getwindowpid"]:
             if argv[2] in self.windows and wine is not None:
                 return 0, f"{wine.pid}\n"
             return 0, "1\n"
+        if argv == ["xdotool", "key", "alt+f"]:
+            self._menu = True
         if argv[:2] == ["xdotool", "type"]:
             self._typed = True
-        if argv == ["xdotool", "key", "Return"] and self._typed:
-            self._typed = False
-            if self.connects:
-                self.windows[MAIN_WID] = PANEL
+        if argv == ["xdotool", "key", "Return"]:
+            if DIALOG_WID in self.windows:  # Return no dialogo: fecha e conecta
+                del self.windows[DIALOG_WID]
+                self._focus = MAIN_WID
+                if self._typed and self.connects:
+                    self.windows[MAIN_WID] = PANEL
+                self._typed = False
+            elif self._menu:  # Return no menu: abre o dialogo de conexao
+                self._menu = False
+                self.windows[DIALOG_WID] = DIALOG
+                if self.dialog_takes_focus:
+                    self._focus = DIALOG_WID
         return 0, ""
 
     def keys(self) -> list[list[str]]:
@@ -485,8 +508,8 @@ def test_janela_nao_aparece_vira_erro(tmp_path, monkeypatch):
     b, _ = make_bridge(tmp_path, monkeypatch, runner=runner)
     orig = runner.spawn
 
-    async def spawn(argv, env):
-        p = await orig(argv, env)
+    async def spawn(argv, env, **kw):
+        p = await orig(argv, env, **kw)
         if argv[0] == "wine":
             runner.windows = {}
         return p
@@ -540,8 +563,8 @@ def test_xvfb_que_morre_nao_passa(tmp_path, monkeypatch):
     b, _ = make_bridge(tmp_path, monkeypatch, runner=runner)
     orig = runner.spawn
 
-    async def spawn(argv, env):
-        p = await orig(argv, env)
+    async def spawn(argv, env, **kw):
+        p = await orig(argv, env, **kw)
         if argv[0] == "Xvfb":
             p.returncode = 1  # saiu na hora (tela ocupada por outro servidor)
         return p
@@ -628,8 +651,8 @@ def test_stop_esperando_janela_nao_deixa_processo(tmp_path, monkeypatch):
     b, _ = make_bridge(tmp_path, monkeypatch, runner=runner, window_timeout=30)
     orig = runner.spawn
 
-    async def spawn(argv, env):
-        p = await orig(argv, env)
+    async def spawn(argv, env, **kw):
+        p = await orig(argv, env, **kw)
         if argv[0] == "wine":
             runner.windows = {}
         return p
@@ -693,3 +716,343 @@ def test_vigia_sobrevive_a_excecao(tmp_path, monkeypatch):
             await b.stop()
 
     asyncio.run(go())
+
+
+
+# ---- foco: janela certa a cada tecla ------------------------------------------------------
+def test_foco_na_principal_no_passo_do_ip_nao_digita(tmp_path, monkeypatch):
+    b, runner = make_bridge(tmp_path, monkeypatch)
+    runner.dialog_takes_focus = False  # o dialogo abriu mas o foco ficou na janela principal
+
+    async def go():
+        await b.start()
+        try:
+            assert runner.keys() == SEQ[:3]  # menu e "Connect"; o IP nunca foi digitado
+            assert not any(k[0] == "type" for k in runner.keys())
+            assert b.state == "error" and "diálogo de conexão" in b.error
+            assert runner.procs("wine")[0].returncode is not None  # CERHost reiniciado
+            assert runner.procs("x11vnc") == []
+        finally:
+            await b.stop()
+
+    asyncio.run(go())
+
+
+def test_titulo_da_principal_muda_entre_passos_aborta(tmp_path, monkeypatch):
+    b, runner = make_bridge(tmp_path, monkeypatch)
+    returns = []
+
+    def first_return():
+        returns.append(1)
+        if len(returns) == 1:
+            runner.windows[MAIN_WID] = "Algo diferente"
+
+    runner.hooks[("xdotool", "key", "Return")] = first_return
+
+    async def go():
+        await b.start()
+        try:
+            assert runner.keys() == SEQ[:3]
+            assert b.state == "error" and "mudou" in b.error
+            assert runner.procs("wine")[0].returncode is not None
+        finally:
+            await b.stop()
+
+    asyncio.run(go())
+
+
+def test_foco_em_janela_de_outro_processo_no_passo_do_ip(tmp_path, monkeypatch):
+    b, runner = make_bridge(tmp_path, monkeypatch)
+    runner.foreign["777"] = "Terminal"
+    # depois do "Connect", o foco vai para uma janela de outro programa
+    runner.hooks[("xdotool", "key", "Return")] = lambda: setattr(runner, "active", "777")
+
+    async def go():
+        await b.start()
+        try:
+            assert runner.keys() == SEQ[:3]
+            assert b.state == "error" and "foco" in b.error
+        finally:
+            await b.stop()
+
+    asyncio.run(go())
+
+
+def test_foco_em_outra_janela_do_cerhost_antes_do_menu(tmp_path, monkeypatch):
+    b, runner = make_bridge(tmp_path, monkeypatch)
+    runner.active = IME_WID  # do mesmo processo, mas nao e a janela principal
+
+    async def go():
+        await b.start()
+        try:
+            assert runner.keys() == SEQ[:1]  # nem o alt+f
+            assert b.state == "error" and "janela principal" in b.error
+        finally:
+            await b.stop()
+
+    asyncio.run(go())
+
+
+# ---- processos que morrem sozinhos -----------------------------------------------------------
+def test_wine_que_fecha_sozinho_avisa_na_hora(tmp_path, monkeypatch, caplog):
+    runner = FakeRunner()
+    b, _ = make_bridge(tmp_path, monkeypatch, runner=runner, window_timeout=30)
+    orig = runner.spawn
+
+    async def spawn(argv, env, **kw):
+        p = await orig(argv, env, **kw)
+        if argv[0] == "wine":
+            Path(kw["stderr_path"]).write_text("wine: WINEARCH set to win32 but '/x' is a 64-bit "
+                                               "installation.\n")
+            p.returncode = 1  # Wine sem 32 bits: sai na hora
+        return p
+
+    runner.spawn = spawn
+
+    async def go():
+        t0 = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger="cerhost"):
+            await b.start()
+        try:
+            assert time.monotonic() - t0 < 2  # nao esperou os 30 s da janela
+            assert b.state == "error"
+            assert "fechou sozinho (código 1)" in b.error and "wine32:i386" in b.error
+            assert "WINEPREFIX" in b.error and runner.keys() == []
+            text = caplog.text
+            assert "cerhost saiu sozinho (código 1)" in text and "64-bit installation" in text
+            assert VIEW not in text and CONTROL not in text
+            await b.check()  # back-off: nada de laco apertado
+            assert len(runner.procs("wine")) == 1
+        finally:
+            await b.stop()
+
+    asyncio.run(go())
+
+
+def test_x11vnc_que_morre_vai_para_o_log(tmp_path, monkeypatch, caplog):
+    b, runner = make_bridge(tmp_path, monkeypatch)
+
+    async def go():
+        await b.start()
+        try:
+            keys = len(runner.keys())
+            Path(runner.stderr_paths["x11vnc"]).write_text("caught signal: 11\n")
+            runner.procs("x11vnc")[0].returncode = 2
+            with caplog.at_level(logging.WARNING, logger="cerhost"):
+                await b.check()
+                await b.check()
+            msgs = [r.getMessage() for r in caplog.records if "saiu sozinho" in r.getMessage()]
+            assert len(msgs) == 1  # uma vez so, nao a cada volta
+            assert "x11vnc saiu sozinho (código 2)" in msgs[0] and "caught signal: 11" in msgs[0]
+            assert len(runner.procs("x11vnc")) == 2 and b.state == "connected"
+            assert len(runner.keys()) == keys  # conectado: o robo nao digitou nada
+        finally:
+            await b.stop()
+
+    asyncio.run(go())
+
+
+def test_stderr_fica_na_pasta_privada(tmp_path, monkeypatch):
+    b, runner = make_bridge(tmp_path, monkeypatch)
+
+    async def go():
+        await b.start()
+        tmpdir = b._tmpdir
+        await b.stop()
+        return tmpdir
+
+    tmpdir = asyncio.run(go())
+    assert set(runner.stderr_paths) == {"Xvfb", "openbox", "wine", "x11vnc"}
+    for path in runner.stderr_paths.values():
+        assert os.path.dirname(path) == tmpdir
+    assert not os.path.exists(tmpdir)  # apagados junto com a pasta no stop
+
+
+def test_runner_de_verdade_grava_stderr(tmp_path):
+    log_file = tmp_path / "err.log"
+
+    async def go():
+        proc = await cerhost.SubprocessRunner().spawn(
+            ["sh", "-c", "echo saida; echo problema >&2; exit 3"], dict(os.environ),
+            stderr_path=str(log_file))
+        return await proc.wait()
+
+    assert asyncio.run(go()) == 3
+    assert log_file.read_text() == "problema\n"
+
+
+def _gone(pid: int) -> bool:
+    try:
+        with open(f"/proc/{pid}/stat") as fh:
+            return fh.read().rsplit(")", 1)[1].split()[0] == "Z"
+    except FileNotFoundError:
+        return True
+
+
+def test_filho_morre_junto_com_o_monitor(tmp_path):
+    """kill -9 no Monitor: o processo aberto pela ponte recebe SIGTERM (PR_SET_PDEATHSIG)."""
+    if not sys.platform.startswith("linux"):
+        return
+    code = ("import asyncio, sys, time\n"
+            "from app.cerhost import SubprocessRunner\n"
+            "async def go():\n"
+            "    p = await SubprocessRunner().spawn(['sleep', '30'], {})\n"
+            "    print(p.pid, flush=True)\n"
+            "    await asyncio.sleep(30)\n"
+            "asyncio.run(go())\n")
+    backend = Path(cerhost.__file__).resolve().parents[1]
+    monitor = subprocess.Popen([sys.executable, "-c", code], cwd=backend, stdout=subprocess.PIPE,
+                               text=True)
+    try:
+        child = int(monitor.stdout.readline())
+        assert not _gone(child)
+        monitor.kill()
+        monitor.wait()
+        deadline = time.monotonic() + 5
+        while not _gone(child) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert _gone(child)
+    finally:
+        monitor.stdout.close()
+        if monitor.poll() is None:
+            monitor.kill()
+            monitor.wait()
+
+
+# ---- sobras de um Monitor que caiu feio (arquivo de pids) ------------------------------------
+def _fake_proc(root: Path, pid: int, argv: list[str]) -> None:
+    (root / str(pid)).mkdir(parents=True)
+    (root / str(pid) / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+
+
+def _pid_bridge(tmp_path, monkeypatch, stubborn=()):
+    pidfile = tmp_path / "data" / "cerhost.pids"
+    b, runner = make_bridge(tmp_path, monkeypatch, pidfile=str(pidfile))
+    root = tmp_path / "proc"
+    root.mkdir()
+    b.proc_root = str(root)
+    kills = []
+
+    def kill(pid, sig):
+        kills.append((pid, sig))
+        if sig == signal.SIGKILL or pid not in stubborn:
+            import shutil
+            shutil.rmtree(root / str(pid), ignore_errors=True)
+
+    b._kill = kill
+    return b, runner, pidfile, root, kills
+
+
+def test_pidfile_gravado_e_apagado(tmp_path, monkeypatch):
+    b, runner, pidfile, _, _ = _pid_bridge(tmp_path, monkeypatch)
+
+    async def go():
+        await b.start()
+        try:
+            lines = pidfile.read_text().splitlines()
+            assert lines[0] == f"owner {os.getpid()}"
+            by_name = dict(line.split() for line in lines[1:])
+            assert by_name == {"xvfb": str(runner.procs("Xvfb")[0].pid),
+                               "openbox": str(runner.procs("openbox")[0].pid),
+                               "cerhost": str(runner.procs("wine")[0].pid),
+                               "x11vnc": str(runner.procs("x11vnc")[0].pid)}
+            assert VIEW not in pidfile.read_text() and CONTROL not in pidfile.read_text()
+        finally:
+            await b.stop()
+        assert not pidfile.exists()
+
+    asyncio.run(go())
+
+
+def test_sobras_sao_encerradas_na_subida(tmp_path, monkeypatch):
+    b, runner, pidfile, root, kills = _pid_bridge(tmp_path, monkeypatch)
+    pidfile.parent.mkdir()
+    pidfile.write_text("owner 2147483646\nx11vnc 41\ncerhost 42\nopenbox 43\nxvfb 44\n")
+    _fake_proc(root, 41, ["x11vnc", "-display", ":99", "-localhost", "-rfbport", "5"])
+    _fake_proc(root, 42, ["C:\\Program Files\\CERHOST.exe"])  # o wine troca o cmdline
+    _fake_proc(root, 43, ["bash"])  # pid reaproveitado por outro programa: nao mexe
+    _fake_proc(root, 44, ["Xvfb", ":99", "-screen", "0", "800x1000x24"])
+
+    async def go():
+        await b.start()
+        try:
+            assert kills == [(41, signal.SIGTERM), (42, signal.SIGTERM), (44, signal.SIGTERM)]
+            assert (root / "43").exists()
+            assert b.state == "connected"
+            assert pidfile.read_text().splitlines()[0] == f"owner {os.getpid()}"
+        finally:
+            await b.stop()
+
+    asyncio.run(go())
+
+
+def test_sobra_de_outra_tela_nao_e_encerrada(tmp_path, monkeypatch):
+    b, runner, pidfile, root, kills = _pid_bridge(tmp_path, monkeypatch)
+    pidfile.parent.mkdir()
+    pidfile.write_text("owner 2147483646\nxvfb 44\nx11vnc 41\n")
+    _fake_proc(root, 44, ["Xvfb", ":98"])  # outra tela virtual
+    _fake_proc(root, 41, ["x11vnc", "-display", ":98"])
+
+    async def go():
+        await b.start()
+        await b.stop()
+
+    asyncio.run(go())
+    assert kills == []
+
+
+def test_sobra_teimosa_leva_sigkill(tmp_path, monkeypatch):
+    b, runner, pidfile, root, kills = _pid_bridge(tmp_path, monkeypatch, stubborn=(42,))
+    pidfile.parent.mkdir()
+    pidfile.write_text("owner 2147483646\ncerhost 42\n")
+    _fake_proc(root, 42, ["wine", "/opt/cerhost/CERHOST.exe"])
+
+    async def go():
+        await b.start()
+        await b.stop()
+
+    asyncio.run(go())
+    assert kills == [(42, signal.SIGTERM), (42, signal.SIGKILL)]
+
+
+def test_pidfile_de_monitor_vivo_nao_mexe(tmp_path, monkeypatch):
+    b, runner, pidfile, root, kills = _pid_bridge(tmp_path, monkeypatch)
+    pidfile.parent.mkdir()
+    pidfile.write_text("owner 77\ncerhost 42\n")
+    _fake_proc(root, 77, ["python", "-m", "uvicorn", "app.main:app"])  # outro Monitor rodando
+    _fake_proc(root, 42, ["wine", "/opt/cerhost/CERHOST.exe"])
+
+    async def go():
+        await b.start()
+        await b.stop()
+
+    asyncio.run(go())
+    assert kills == []
+
+
+# ---- stop cancelado ----------------------------------------------------------------------------
+def test_stop_cancelado_repassa_o_cancelamento(tmp_path, monkeypatch):
+    b, runner = make_bridge(tmp_path, monkeypatch, window_timeout=30)
+    runner.spawn_delay["wine"] = 0.2  # o vigia demora a sair (spawn em andamento)
+
+    async def go():
+        t = asyncio.create_task(b.start())
+        while not runner.procs("wine"):
+            await asyncio.sleep(0.001)
+        stop = asyncio.create_task(b.stop())
+        await asyncio.sleep(0.02)
+        stop.cancel()  # quem chamou o stop foi cancelado (ex.: estouro do wait_for)
+        try:
+            await stop
+            raised = False
+        except asyncio.CancelledError:
+            raised = True
+        await t
+        for _ in range(200):  # o encerramento segue, protegido
+            if alive(runner) == [] and b.state == "stopped":
+                break
+            await asyncio.sleep(0.01)
+        return raised
+
+    assert asyncio.run(go()) is True
+    assert alive(runner) == []

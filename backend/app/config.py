@@ -79,6 +79,8 @@ class Settings:
     # (mataria outros programas Wine do mesmo usuário).
     cerhost_wineprefix: str = (_path(os.getenv("CERHOST_WINEPREFIX", ""))
                                if os.getenv("CERHOST_WINEPREFIX", "").strip() else "")
+    # pids dos processos da ponte: a proxima subida encerra as sobras de um Monitor que caiu feio
+    cerhost_pidfile: str = _path(os.getenv("CERHOST_PIDFILE", "data/cerhost.pids"))
 
 
 settings = Settings()

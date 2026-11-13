@@ -102,7 +102,8 @@ class MachineManager:
         s = self.settings
         return CerhostBridge(m.host, getattr(s, "cerhost_display", 99), getattr(s, "cerhost_exe", ""),
                              m.vnc_view_password, m.vnc_control_password,
-                             wineprefix=getattr(s, "cerhost_wineprefix", ""))
+                             wineprefix=getattr(s, "cerhost_wineprefix", ""),
+                             pidfile=getattr(s, "cerhost_pidfile", ""))
 
     def _new_hub(self, m: Machine, bridge) -> VncHub | None:
         """Hub da tela ao vivo. Beckhoff (ads): o painel é o x11vnc da ponte, em 127.0.0.1.

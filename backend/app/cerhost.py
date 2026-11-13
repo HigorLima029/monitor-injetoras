@@ -20,6 +20,11 @@ Regras (comprovadas em bancada):
   * A tela virtual tem cookie proprio (Xauthority na pasta privada): outro usuario local nao a
     controla. As senhas VNC vao para o x11vnc por arquivo (0600, mesma pasta, apagado depois de
     lido), nunca pela linha de comando nem no log.
+  * Processo que morre sozinho vai para o log (nome, codigo e o fim do stderr, que fica num
+    arquivo da pasta privada). Os processos morrem junto com o Monitor (PR_SET_PDEATHSIG) e ficam
+    anotados num arquivo de pids: se o Monitor cair feio (kill -9, falta de memoria), a proxima
+    subida encerra as sobras dele (so as que ainda sao o que ele abriu), em vez de deixar o
+    CERHost ligado na IHM e a tela :N ocupada.
   * Nada aqui escreve no CLP.
 """
 from __future__ import annotations
@@ -33,6 +38,7 @@ import shutil
 import signal
 import socket
 import struct
+import sys
 import tempfile
 from pathlib import Path
 
@@ -43,6 +49,8 @@ MAIN_TITLE = "Remote Display Control for Windows CE"
 IGNORED_TITLES = frozenset({MAIN_TITLE, "Default IME"})
 SCREEN = "800x1000x24"  # o painel e em pe (~600x850 com a barra do CERHost)
 ALL = ("x11vnc", "cerhost", "openbox", "xvfb")  # ordem de encerramento
+LOG_TAIL_LINES = 10      # linhas do stderr de um processo que morreu, no log
+LOG_TAIL_BYTES = 4096
 
 
 def missing_tools(cerhost_exe: str) -> list[str]:
@@ -80,15 +88,35 @@ def _write_xauthority(path: Path, display: int, cookie: bytes) -> None:
         fh.write(data)
 
 
+def _die_with_parent() -> None:
+    """No filho, antes do exec: recebe SIGTERM se o Monitor morrer (Linux; senao nao faz nada)."""
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        import ctypes
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.prctl(1, int(signal.SIGTERM), 0, 0, 0)  # PR_SET_PDEATHSIG
+        if os.getppid() == 1:  # o Monitor ja morreu entre o fork e o prctl
+            os.kill(os.getpid(), signal.SIGTERM)
+    except Exception:  # nunca impede o processo de subir
+        pass
+
+
 class SubprocessRunner:
     """Executor de verdade (os testes trocam por um falso)."""
 
-    async def spawn(self, argv: list[str], env: dict[str, str]):
+    async def spawn(self, argv: list[str], env: dict[str, str], stderr_path: str | None = None):
         # sessao propria: o processo vira lider de grupo e o stop encerra o grupo inteiro
-        return await asyncio.create_subprocess_exec(
-            *argv, env=env, stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True)
+        err = open(stderr_path, "wb") if stderr_path else None  # o filho herda o descritor
+        try:
+            return await asyncio.create_subprocess_exec(
+                *argv, env=env, stdin=asyncio.subprocess.DEVNULL,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=err if err is not None else asyncio.subprocess.DEVNULL,
+                start_new_session=True, preexec_fn=_die_with_parent)
+        finally:
+            if err is not None:
+                err.close()
 
     def signal(self, proc, sig: int) -> None:
         """Sinal para o grupo do processo (o wine deixa filhos)."""
@@ -149,8 +177,11 @@ class CerhostBridge:
     cmd_timeout = 5.0        # cada xdotool/wmctrl
     x11_tmp = "/tmp"         # onde ficam .X{N}-lock e .X11-unix
 
+    proc_root = "/proc"      # onde ler o cmdline das sobras (os testes trocam)
+
     def __init__(self, host: str, display: int, cerhost_exe: str, view_password: str,
-                 control_password: str = "", runner=None, wineprefix: str = "") -> None:
+                 control_password: str = "", runner=None, wineprefix: str = "",
+                 pidfile: str = "") -> None:
         self.host = host
         self.display = display
         self.cerhost_exe = cerhost_exe
@@ -159,6 +190,8 @@ class CerhostBridge:
         # prefixo Wine DEDICADO (opcional): so com ele o stop roda `wineserver -k`
         self.wineprefix = wineprefix
         self.runner = runner or SubprocessRunner()
+        # arquivo de pids (ex.: data/cerhost.pids): as sobras de um Monitor que caiu feio
+        self.pidfile = pidfile
         self.state = "stopped"
         self.error: str | None = None
         self.port: int | None = None
@@ -169,6 +202,7 @@ class CerhostBridge:
         self._stopped = True
         self._not_before = 0.0
         self._last_port: int | None = None
+        self._reported: set[int] = set()  # pids cuja morte ja foi para o log
 
     # ------------------------------------------------------------------ ciclo de vida
     @property
@@ -202,6 +236,7 @@ class CerhostBridge:
         self._stopped = False
         self._not_before = 0.0
         self._lock = asyncio.Lock()
+        await self._kill_leftovers()
         try:
             self._tmpdir = tempfile.mkdtemp(prefix="cerhost-")  # 0700
             _write_xauthority(Path(self._tmpdir) / "Xauthority", self.display,
@@ -217,12 +252,21 @@ class CerhostBridge:
     async def stop(self) -> None:
         self._stopped = True
         task, self._task = self._task, None
+        caller_cancelled = False
         if task is not None:
             task.cancel()
-            with contextlib.suppress(asyncio.CancelledError):
-                await task
+            try:
+                # shield: se quem chamou o stop for cancelado, o cancelamento nao chega de novo ao
+                # vigia (que ainda pode estar registrando um processo recem-aberto)
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # o CancelledError do vigia e esperado; o de quem chamou o stop, nao: repassa
+                current = asyncio.current_task()
+                caller_cancelled = current is not None and current.cancelling() > 0
         # o encerramento final termina mesmo que quem chamou o stop seja cancelado
         await asyncio.shield(self._teardown())
+        if caller_cancelled:
+            raise asyncio.CancelledError
 
     async def _teardown(self) -> None:
         if self._lock is not None:
@@ -265,6 +309,7 @@ class CerhostBridge:
     # ------------------------------------------------------------------ vigia
     async def _ensure(self) -> None:
         try:
+            await self._report_dead()
             if not (self._alive("xvfb") and self._alive("openbox")):
                 await self._stop_procs(ALL)
                 await self._start_display()
@@ -323,9 +368,11 @@ class CerhostBridge:
         await self._spawn("xvfb", ["Xvfb", d, "-screen", "0", SCREEN, "-nolisten", "tcp",
                                    "-auth", self._env["XAUTHORITY"]])
         if not await self._poll(self._display_ready, self.ready_timeout):
+            self._log_exit("xvfb")
             raise BridgeError(f"a tela virtual {d} (Xvfb) não subiu")
         await self._spawn("openbox", ["openbox"])
         if not await self._poll(self._wm_ready, self.ready_timeout):
+            self._log_exit("openbox")
             raise BridgeError("o Openbox não subiu na tela virtual")
 
     async def _connect(self) -> None:
@@ -336,10 +383,13 @@ class CerhostBridge:
             raise BridgeError(f"a janela do CERHost não apareceu em {self.window_timeout:g} s",
                               restart_cerhost=not unknown)
         log.info("conectando o CERHost em %s", self.host)
-        steps = (["windowfocus", "--sync", wid], ["key", "alt+f"], ["key", "Return"],
-                 ["type", "--delay", "50", self.host], ["key", "Return"])
-        for step in steps:
-            if step[0] != "windowfocus" and not await self._safe_to_type():
+        # (comando, onde o foco tem de estar): menu e "Connect" na janela principal; o IP e o
+        # Enter final no dialogo de conexao (outra janela do mesmo processo do CERHost)
+        steps = ((["windowfocus", "--sync", wid], None), (["key", "alt+f"], "main"),
+                 (["key", "Return"], "main"), (["type", "--delay", "50", self.host], "dialog"),
+                 (["key", "Return"], "dialog"))
+        for step, where in steps:
+            if where is not None and not await self._safe_to_type(wid, where):
                 log.info("CERHost conectou durante a sequência; o robô parou de digitar")
                 break
             rc, _ = await self._cmd(["xdotool", *step])
@@ -355,20 +405,44 @@ class CerhostBridge:
         await self._cmd(["wmctrl", "-r", title, "-b", "add,maximized_vert,maximized_horz"])
         log.info("CERHost conectado em %s (%s)", self.host, title)
 
-    async def _safe_to_type(self) -> bool:
-        """Antes de cada tecla: ainda desconectado e com o foco no CERHost? Conectou = False."""
+    async def _safe_to_type(self, main_wid: str, where: str) -> bool:
+        """Antes de cada tecla: ainda desconectado e com o foco na janela certa? Conectou = False.
+
+        where="main": a janela ativa e a principal (main_wid), com o titulo original lido nela.
+        where="dialog": a ativa e OUTRA janela do processo do CERHost (o dialogo de conexao), e a
+        principal continua com o titulo original. Qualquer divergencia: aborta sem digitar.
+        """
         windows = await self._cerhost_windows()
         if windows is None:
             raise BridgeError("não deu para conferir as janelas do CERHost; o robô não digitou")
-        if self._connected_title(windows) is not None:
+        main_name = await self._window_name(main_wid)
+        if where == "dialog":
+            # com o dialogo aberto o CERHost nao conecta: titulo mudou = algo estranho, aborta
+            if main_name != MAIN_TITLE:
+                raise BridgeError("a janela principal do CERHost mudou no meio da sequência; "
+                                  "o robô não digitou", restart_cerhost=True)
+        elif self._connected_title(windows) is not None:
             return False
         proc = self._procs.get("cerhost")
-        rc, wid = await self._cmd(["xdotool", "getactivewindow"])
-        if rc == 0 and wid.strip():
-            rc, pid = await self._cmd(["xdotool", "getwindowpid", wid.strip()])
-            if rc == 0 and proc is not None and pid.strip() == str(proc.pid):
+        rc, out = await self._cmd(["xdotool", "getactivewindow"])
+        active = out.strip() if rc == 0 else ""
+        if active and proc is not None:
+            active_name = await self._window_name(active)
+            if where == "main":
+                ok = active == main_wid and main_name == MAIN_TITLE and active_name == MAIN_TITLE
+            else:
+                rc, pid = await self._cmd(["xdotool", "getwindowpid", active])
+                ok = (active != main_wid and rc == 0 and pid.strip() == str(proc.pid)
+                      and active_name is not None and active_name not in IGNORED_TITLES)
+            if ok:
                 return True
-        raise BridgeError("o foco não está no CERHost; o robô não digitou", restart_cerhost=True)
+        janela = "na janela principal" if where == "main" else "no diálogo de conexão"
+        raise BridgeError(f"o foco não está {janela} do CERHost; o robô não digitou",
+                          restart_cerhost=True)
+
+    async def _window_name(self, wid: str) -> str | None:
+        rc, name = await self._cmd(["xdotool", "getwindowname", wid])
+        return name.rstrip("\r\n") if rc == 0 else None
 
     async def _start_vnc(self) -> None:
         path = Path(self._tmpdir) / "senhas"
@@ -437,6 +511,12 @@ class CerhostBridge:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         while True:
+            proc = self._procs.get("cerhost")
+            if proc is not None and proc.returncode is not None:
+                self._log_exit("cerhost")
+                raise BridgeError(f"o CERHost (Wine) fechou sozinho (código {proc.returncode}); "
+                                  "confira o Wine 32 bits (wine32:i386) e o WINEPREFIX",
+                                  restart_cerhost=True, backoff=True)
             windows = await self._cerhost_windows()
             if windows is not None:
                 value = pick(windows)
@@ -458,17 +538,152 @@ class CerhostBridge:
     # ------------------------------------------------------------------ processos
     async def _spawn(self, name: str, argv: list[str]) -> None:
         """Inicia e REGISTRA o processo, mesmo se o vigia for cancelado no meio do spawn."""
-        fut = asyncio.ensure_future(self.runner.spawn(argv, self._env))
+        stderr = str(Path(self._tmpdir) / f"{name}.log") if self._tmpdir else None
+        fut = asyncio.ensure_future(self.runner.spawn(argv, self._env, stderr_path=stderr))
         try:
             self._procs[name] = await asyncio.shield(fut)
         except asyncio.CancelledError:
             with contextlib.suppress(Exception):
                 self._procs[name] = await fut
             raise
+        finally:
+            self._write_pidfile()
 
     def _alive(self, name: str) -> bool:
         proc = self._procs.get(name)
         return proc is not None and proc.returncode is None
+
+    async def _report_dead(self) -> None:
+        """Processo que a ponte abriu e morreu sozinho: vai para o log e sai da lista."""
+        dead = [n for n in ALL if n in self._procs and not self._alive(n)]
+        for name in dead:
+            self._log_exit(name)
+        if dead:
+            await self._stop_procs(dead)
+
+    def _log_exit(self, name: str) -> None:
+        proc = self._procs.get(name)
+        if proc is None or proc.returncode is None or proc.pid in self._reported:
+            return
+        self._reported.add(proc.pid)
+        tail = self._stderr_tail(name)
+        log.warning("CERHost: o processo %s saiu sozinho (código %s)%s", name, proc.returncode,
+                    (": últimas linhas do stderr:\n" + tail) if tail else "")
+
+    def _stderr_tail(self, name: str) -> str:
+        """Fim do stderr do processo (so as mensagens dele; as senhas so existem no arquivo rm:)."""
+        if not self._tmpdir:
+            return ""
+        try:
+            with open(Path(self._tmpdir) / f"{name}.log", "rb") as fh:
+                fh.seek(0, os.SEEK_END)
+                fh.seek(max(0, fh.tell() - LOG_TAIL_BYTES))
+                data = fh.read()
+        except OSError:
+            return ""
+        lines = data.decode("utf-8", "replace").splitlines()[-LOG_TAIL_LINES:]
+        return "\n".join("  " + line for line in lines if line.strip())
+
+    # ------------------------------------------------------------------ sobras (arquivo de pids)
+    def _write_pidfile(self) -> None:
+        if not self.pidfile:
+            return
+        procs = {n: p for n, p in self._procs.items() if p is not None}
+        try:
+            path = Path(self.pidfile)
+            if not procs:
+                with contextlib.suppress(FileNotFoundError):
+                    path.unlink()
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = path.with_name(path.name + ".tmp")
+            lines = [f"owner {os.getpid()}"] + [f"{n} {p.pid}" for n, p in procs.items()]
+            tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+            os.replace(tmp, path)
+        except OSError as exc:
+            log.warning("CERHost: não deu para gravar %s (%s)", self.pidfile, exc)
+
+    def _cmdline(self, pid: int) -> list[str] | None:
+        """cmdline do pid, so se o processo e do nosso usuario (None = nao existe/zumbi/de outro)."""
+        base = Path(self.proc_root) / str(pid)
+        try:
+            if base.stat().st_uid != os.getuid():
+                return None
+            raw = (base / "cmdline").read_bytes()
+        except OSError:
+            return None
+        argv = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+        return argv or None
+
+    def _is_ours(self, name: str, argv: list[str] | None) -> bool:
+        """O pid ainda e o que a ponte abriu? (pid reaproveitado por outro programa = nao)."""
+        if not argv:
+            return False
+        exe, d = os.path.basename(argv[0]), f":{self.display}"
+        if name == "xvfb":
+            return exe == "Xvfb" and d in argv[1:2]
+        if name == "openbox":
+            return exe == "openbox"
+        if name == "x11vnc":
+            return exe == "x11vnc" and "-display" in argv and argv[argv.index("-display") + 1:][:1] == [d]
+        if name == "cerhost":
+            return any("cerhost" in os.path.basename(a.replace("\\", "/")).lower() for a in argv)
+        return False
+
+    @staticmethod
+    def _kill(pid: int, sig: int) -> None:
+        try:
+            if os.getpgid(pid) == pid:
+                os.killpg(pid, sig)  # era lider do grupo: leva os filhos junto
+            else:
+                os.kill(pid, sig)
+        except (ProcessLookupError, PermissionError):
+            pass
+
+    async def _kill_leftovers(self) -> None:
+        """Encerra as sobras de um Monitor anterior que caiu sem desligar a ponte."""
+        if not self.pidfile:
+            return
+        path = Path(self.pidfile)
+        try:
+            lines = path.read_text(encoding="utf-8").splitlines()
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            log.warning("CERHost: não deu para ler %s (%s)", self.pidfile, exc)
+            return
+        entries: dict[str, int] = {}
+        owner = None
+        for line in lines:
+            parts = line.split()
+            if len(parts) == 2 and parts[1].isdigit():
+                if parts[0] == "owner":
+                    owner = int(parts[1])
+                else:
+                    entries[parts[0]] = int(parts[1])
+        if owner is not None and owner != os.getpid() and self._cmdline(owner) is not None:
+            log.warning("CERHost: %s é de outro Monitor ainda vivo (pid %s); sobras não mexidas",
+                        self.pidfile, owner)
+            return
+        found = [(n, entries[n]) for n in ALL
+                 if n in entries and self._is_ours(n, self._cmdline(entries[n]))]
+        for name, pid in found:
+            log.warning("CERHost: encerrando sobra de um Monitor anterior: %s (pid %s)", name, pid)
+            self._kill(pid, signal.SIGTERM)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self.kill_timeout
+        while found:
+            found = [(n, p) for n, p in found if self._is_ours(n, self._cmdline(p))]
+            if not found:
+                break
+            if loop.time() >= deadline:
+                for name, pid in found:
+                    log.warning("CERHost: sobra %s (pid %s) não saiu com SIGTERM; forçando", name, pid)
+                    self._kill(pid, signal.SIGKILL)
+                break
+            await asyncio.sleep(self.poll_interval)
+        with contextlib.suppress(OSError):
+            path.unlink()
 
     async def _stop_procs(self, names) -> None:
         for name in names:
@@ -491,6 +706,7 @@ class CerhostBridge:
             if name == "cerhost" and proc is not None and self.wineprefix:
                 # so num prefixo dedicado: no padrao mataria outros programas Wine do usuario
                 await self._cmd(["wineserver", "-k"])
+        self._write_pidfile()
 
     def _drop_tmpdir(self) -> None:
         if self._tmpdir:
