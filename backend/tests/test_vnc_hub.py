@@ -379,3 +379,13 @@ def test_porta_do_painel_segue_o_provedor():
             panel.stop()
 
     asyncio.run(run())
+
+
+def test_registro_com_rotulo_da_maquina(tmp_path):
+    """Beckhoff: o hub liga no x11vnc local, mas o registro mostra o IP do painel."""
+    log_path = tmp_path / "audit.log"
+    hub = VncHub("127.0.0.1", 45901, VIEW, CONTROL, name="Bk", audit_path=str(log_path),
+                 audit_label="10.0.0.7")
+    hub.audit("alguem entrou")
+    linha = log_path.read_text(encoding="utf-8")
+    assert "[Bk 10.0.0.7] alguem entrou" in linha and "127.0.0.1" not in linha

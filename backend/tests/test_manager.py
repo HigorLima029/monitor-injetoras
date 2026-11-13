@@ -391,6 +391,10 @@ def test_ads_com_tela_sobe_ponte_e_hub(tmp_path):
             assert mgr.hub.current_port() == 45901
             assert mgr.hub.view_password == "vista" and mgr.hub.control_password == "op"
             assert mgr.hub.name == "Bk"
+            # o registro mostra o IP do painel, nao o x11vnc interno (127.0.0.1:porta)
+            mgr.hub.audit("teste")
+            assert mgr.hub.events[-1]["text"] == "teste"
+            assert mgr.hub.audit_label == "10.0.0.7"
             b.port = 45999  # x11vnc reiniciado em outra porta: o hub acompanha
             assert mgr.hub.current_port() == 45999
             b.port = None  # x11vnc desligado enquanto o robô reconecta

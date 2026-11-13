@@ -117,8 +117,9 @@ class MachineManager:
         if m.kind == "ads":
             if bridge is None:
                 return None
+            # o registro mostra o IP do painel, nao o 127.0.0.1:porta interno da ponte
             return VncHub(BRIDGE_HOST, bridge.port or 0, m.vnc_view_password, m.vnc_control_password,
-                          port_provider=lambda: bridge.port, **common)
+                          port_provider=lambda: bridge.port, audit_label=m.host, **common)
         if not self._wants_screen(m):
             return None
         return VncHub(m.host, m.vnc_port, m.vnc_view_password, m.vnc_control_password, **common)

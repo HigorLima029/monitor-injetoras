@@ -298,8 +298,10 @@ class VncHub:
     def __init__(self, host: str, port: int, view_password: str, control_password: str = "",
                  control_timeout: float = 300, name: str = "Painel", audit_path: str | None = None,
                  idle_grace: float = 20, connect_timeout: float = 12, min_interval: float = 0.1,
-                 port_provider=None) -> None:
+                 port_provider=None, audit_label: str | None = None) -> None:
         self.host, self.port = host, port
+        # como a maquina aparece no registro (Beckhoff: o IP do painel, nao o x11vnc local)
+        self.audit_label = audit_label
         # Beckhoff: a porta e a do x11vnc da ponte CERHost, que pode ainda nao existir ou mudar.
         # O provedor e consultado a cada tentativa; None = tela ainda nao pronta (tenta de novo).
         self.port_provider = port_provider
@@ -334,7 +336,8 @@ class VncHub:
     def audit(self, text: str) -> None:
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         self.events.append({"time": time.time(), "text": text})
-        machine = f"[{self.name} {self.host}:{self.port}]"  # o registro e um so para todas as maquinas
+        where = self.audit_label or f"{self.host}:{self.port}"
+        machine = f"[{self.name} {where}]"  # o registro e um so para todas as maquinas
         log.info("VNC %s %s", machine, text)
         if self.audit_path:
             try:
