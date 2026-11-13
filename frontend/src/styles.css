@@ -432,3 +432,4 @@ textarea { resize: vertical; }
   .picker select { flex: 1; max-width: none; }
 }
 .banner > svg { flex: none; margin-top: 2px; }
+.machine-form h3:focus { outline: none; }

@@ -1,5 +1,5 @@
 import { AlertTriangle, Check, Pencil, Plus, Trash2, Wifi, X } from 'lucide-react'
-import { useMemo, useState, type FormEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
 import { activateMachine, ApiError, deleteMachine, saveMachine, testMachine, usePoll } from './api'
 import type { Machine, MachineInput, MachineKind, MachineList } from './api'
 
@@ -41,6 +41,9 @@ function draftOf(m: Machine): Draft {
   }
 }
 
+/** Padrão de tela por tipo (o mesmo do servidor: só o Euromap 63 liga a tela sozinho). */
+const vncDefault = (k: MachineKind) => k === 'em63'
+
 const isPort = (v: string) => /^\d+$/.test(v) && +v >= 1 && +v <= 65535
 
 function validate(d: Draft): Partial<Record<keyof Draft, string>> {
@@ -57,32 +60,39 @@ function validate(d: Draft): Partial<Record<keyof Draft, string>> {
   return e
 }
 
-function toInput(d: Draft): MachineInput {
-  const body: MachineInput = {
-    client: d.client.trim(), name: d.name.trim(), kind: d.kind, host: d.host.trim(), notes: d.notes.trim(),
-  }
+/**
+ * Corpo do POST/PUT. Na edição só vão os campos que mudaram (PUT parcial); assim o namespace e a tela
+ * que o servidor devolve já resolvidos pelo tipo não viram valores fixos. Namespace em branco = padrão do tipo.
+ */
+function toInput(d: Draft, orig: Draft | null): MachineInput {
+  const kindChanged = !!orig && orig.kind !== d.kind
+  const changed = (k: keyof Draft) => !orig || kindChanged || orig[k] !== d[k]
+  const body: MachineInput = {}
+  const base = (['client', 'name', 'kind', 'host', 'notes'] as const)
+  for (const k of base) if (!orig || orig[k] !== d[k]) body[k] = d[k].trim() as never
   if (d.kind === 'chy' || d.kind === 'em63') {
-    body.opcua_port = +d.opcua_port
-    body.namespace = d.namespace.trim() ? +d.namespace : null
-    body.vnc_enabled = d.vnc_enabled
-    body.vnc_port = +d.vnc_port || 5900
+    if (changed('opcua_port')) body.opcua_port = +d.opcua_port
+    if (changed('namespace')) body.namespace = d.namespace.trim() ? +d.namespace : null
+    if (changed('vnc_enabled')) body.vnc_enabled = d.vnc_enabled
+    if (changed('vnc_port')) body.vnc_port = +d.vnc_port || 5900
     // Senha em branco = não enviar: o servidor mantém a que já existe.
     if (d.vnc_view_password) body.vnc_view_password = d.vnc_view_password
     if (d.vnc_control_password) body.vnc_control_password = d.vnc_control_password
   }
   if (d.kind === 'ads') {
-    body.ams_net_id = d.ams_net_id.trim()
-    body.ads_port = +d.ads_port
+    if (changed('ams_net_id')) body.ams_net_id = d.ams_net_id.trim()
+    if (changed('ads_port')) body.ads_port = +d.ads_port
   }
   return body
 }
 
-type Probe = { busy: true } | { busy: false; online: boolean; latency_ms: number | null }
+type Probe = { busy: true } | { busy: false; online: boolean; latency_ms: number | null; at: number }
 
 function Presence({ m, probe }: { m: Machine; probe?: Probe }) {
   let online = m.status?.online ?? null
   let latency = m.status?.latency_ms ?? null
-  if (probe && !probe.busy) { online = probe.online; latency = probe.latency_ms }
+  // O teste manual vale até o servidor registrar uma verificação mais nova.
+  if (probe && !probe.busy && probe.at > (m.status?.checked ?? 0)) { online = probe.online; latency = probe.latency_ms }
   const cls = probe?.busy ? 'checking' : online === null ? 'unknown' : online ? 'on' : 'off'
   const text = probe?.busy ? 'Testando…' : online === null ? 'Não verificada'
     : online ? (latency !== null ? `Online · ${Math.round(latency)} ms` : 'Online') : 'Offline'
@@ -114,7 +124,7 @@ export function MachinesPage({ onOpened, onChanged }: { onOpened: () => void; on
     setProbes((p) => ({ ...p, [m.id]: { busy: true } }))
     try {
       const r = await testMachine(m.id)
-      setProbes((p) => ({ ...p, [m.id]: { busy: false, ...r } }))
+      setProbes((p) => ({ ...p, [m.id]: { busy: false, ...r, at: Date.now() / 1000 } }))
     } catch (e) {
       setProbes((p) => Object.fromEntries(Object.entries(p).filter(([k]) => Number(k) !== m.id)))
       fail(e)
@@ -212,7 +222,15 @@ export function MachinesPage({ onOpened, onChanged }: { onOpened: () => void; on
 function MachineForm({ machine, clients, onClose, onSaved }: {
   machine: Machine | null; clients: string[]; onClose: () => void; onSaved: () => void
 }) {
-  const [d, setD] = useState<Draft>(machine ? draftOf(machine) : EMPTY)
+  const orig = useMemo(() => (machine ? draftOf(machine) : null), [machine])
+  const [d, setD] = useState<Draft>(orig ?? { ...EMPTY, vnc_enabled: vncDefault(EMPTY.kind) })
+  const heading = useRef<HTMLHeadingElement>(null)
+  useEffect(() => {
+    const h = heading.current
+    if (!h) return
+    h.focus({ preventScroll: true })
+    if (window.matchMedia('(max-width: 820px)').matches) h.scrollIntoView({ block: 'start' })
+  }, [])
   const [touched, setTouched] = useState<Partial<Record<keyof Draft, boolean>>>({})
   const [submitted, setSubmitted] = useState(false)
   const [serverErrors, setServerErrors] = useState<string[]>([])
@@ -229,7 +247,7 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
     if (Object.keys(errors).length) return
     setSaving(true); setServerErrors([])
     try {
-      await saveMachine(toInput(d), machine?.id)
+      await saveMachine(toInput(d, orig), machine?.id)
       onSaved()
     } catch (e) {
       setServerErrors(e instanceof ApiError ? e.messages : [e instanceof Error ? e.message : String(e)])
@@ -255,7 +273,7 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
   return (
     <form className="panel machine-form" onSubmit={submit} noValidate aria-label={machine ? `Editar ${machine.name}` : 'Nova máquina'}>
       <div className="panel-head">
-        <h3>{machine ? `Editar ${machine.name}` : 'Nova máquina'}</h3>
+        <h3 ref={heading} tabIndex={-1}>{machine ? `Editar ${machine.name}` : 'Nova máquina'}</h3>
         <button type="button" className="btn icon right" onClick={onClose} aria-label="Fechar formulário" title="Fechar"><X size={16} aria-hidden="true" /></button>
       </div>
 
@@ -269,7 +287,7 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
         {text('name', 'Nome da máquina', { placeholder: 'Ex.: Injetora 03' })}
         <label className="field">
           Tipo
-          <select value={d.kind} onChange={(e) => set('kind', e.target.value as MachineKind)}>
+          <select value={d.kind} onChange={(e) => { const k = e.target.value as MachineKind; setD((x) => ({ ...x, kind: k, namespace: '', vnc_enabled: vncDefault(k) })) }}>
             {(Object.keys(KIND_LABEL) as MachineKind[]).map((k) => <option key={k} value={k}>{KIND_LABEL[k]}</option>)}
           </select>
         </label>
