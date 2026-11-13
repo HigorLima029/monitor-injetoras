@@ -154,13 +154,19 @@ Sem gateway por perto? Rode com dados simulados e 8 h de histórico fictício:
 ./run.sh --demo
 ```
 
+A demo usa um cadastro e um histórico só dela (`data/demo_config.db`,
+`data/demo_machines/`, `data/demo.db`), recriados a cada `--demo`; o cadastro
+real (`data/monitor_config.db`) não é tocado.
+
 ### Desenvolvimento
 
 ```bash
 # backend
 cd backend
 python3 -m venv .venv && .venv/bin/pip install -r requirements.txt
-SIMULATE=1 .venv/bin/uvicorn app.main:app --reload --port 8000
+# dados simulados com cadastro e histórico separados (não mexe no data/monitor_config.db)
+SIMULATE=1 CONFIG_DB_PATH=data/dev_config.db MACHINES_DIR=data/dev_machines DB_PATH=data/dev.db \
+  .venv/bin/uvicorn app.main:app --reload --port 8000
 
 # frontend (outro terminal) — abre em http://localhost:5173
 cd frontend && npm install && npm run dev
