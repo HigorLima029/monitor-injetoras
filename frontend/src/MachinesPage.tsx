@@ -44,7 +44,7 @@ function draftOf(m: Machine): Draft {
 }
 
 /** Padrão de tela por tipo (o mesmo do servidor: só o Euromap 63 liga a tela sozinho). */
-const vncDefault = (k: MachineKind) => k === 'em63'
+const vncDefault = (k: MachineKind) => k === 'em63'  // ads: desligada, o usuário liga
 
 const isPort = (v: string) => /^\d+$/.test(v) && +v >= 1 && +v <= 65535
 
@@ -68,6 +68,10 @@ function validate(d: Draft): Partial<Record<keyof Draft, string>> {
   if (opc && d.namespace.trim() && !/^\d+$/.test(d.namespace.trim())) e.namespace = 'Use um número inteiro.'
   if (d.kind === 'ads' && !d.ams_net_id.trim()) e.ams_net_id = 'Informe o AMS Net ID (ex.: 192.168.0.10.1.1).'
   if (d.kind === 'ads' && !isPort(d.ads_port)) e.ads_port = 'Use um número de 1 a 65535.'
+  if (d.kind === 'ads' && d.vnc_enabled) {
+    if (d.vnc_view_password.length > 8) e.vnc_view_password = 'Use até 8 caracteres.'
+    if (d.vnc_control_password.length > 8) e.vnc_control_password = 'Use até 8 caracteres.'
+  }
   if (opc && d.vnc_enabled && !isPort(d.vnc_port)) e.vnc_port = 'Use um número de 1 a 65535.'
   return e
 }
@@ -93,8 +97,16 @@ function toInput(d: Draft, orig: Draft | null): MachineInput {
     else if (d.vnc_view_password) body.vnc_view_password = d.vnc_view_password
     if (d.clear_control && !target) body.clear_vnc_control_password = true
     else if (d.vnc_control_password) body.vnc_control_password = d.vnc_control_password
+  } else if (d.kind === 'ads') {
+    // Beckhoff: o CERHost roda no servidor (porta interna, sem campo). Só liga/desliga e as senhas desta tela.
+    if (changed('vnc_enabled')) body.vnc_enabled = d.vnc_enabled
+    const target = retargets(d, orig)
+    if (d.clear_view && !target) body.clear_vnc_view_password = true
+    else if (d.vnc_view_password) body.vnc_view_password = d.vnc_view_password
+    if (d.clear_control && !target) body.clear_vnc_control_password = true
+    else if (d.vnc_control_password) body.vnc_control_password = d.vnc_control_password
   } else if (kindChanged) {
-    // Beckhoff e simulada não têm Tela ao vivo (por enquanto): volta ao padrão do tipo.
+    // Simulada não tem Tela ao vivo: volta ao padrão do tipo.
     body.vnc_enabled = null
   }
   if (d.kind === 'ads') {
@@ -328,20 +340,20 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
         )}
       </div>
 
-      {opc && (
+      {(opc || d.kind === 'ads') && (
         <fieldset className="form-group">
-          <legend>Tela ao vivo (VNC)</legend>
-          <label className="check"><input type="checkbox" checked={d.vnc_enabled} onChange={(e) => set('vnc_enabled', e.target.checked)} />Mostrar a tela da máquina no monitor</label>
+          <legend>{opc ? 'Tela ao vivo (VNC)' : 'Tela ao vivo (CERHost)'}</legend>
+          <label className="check"><input type="checkbox" checked={d.vnc_enabled} onChange={(e) => set('vnc_enabled', e.target.checked)} />{opc ? 'Mostrar a tela da máquina no monitor' : 'Mostrar a tela da Beckhoff (CERHost) no monitor'}</label>
           {retarget && (
             <p className="retarget-hint" role="status"><AlertTriangle size={14} aria-hidden="true" /> Ao trocar o IP ou a porta, digite as senhas de novo.</p>
           )}
           {d.vnc_enabled && (
             <div className="form-grid">
-              {text('vnc_port', 'Porta VNC', { inputMode: 'numeric' })}
+              {opc && text('vnc_port', 'Porta VNC', { inputMode: 'numeric' })}
               <div className="stack-tight">
                 {text('vnc_view_password', 'Senha de visualização', {
                   type: 'password', placeholder: keepHint(machine?.has_view_password),
-                  hint: 'Só assistir a tela.', disabled: d.clear_view && !retarget,
+                  hint: opc ? 'Só assistir a tela.' : 'Só assistir a tela. Senhas desta tela no Monitor, até 8 caracteres.', disabled: d.clear_view && !retarget,
                 })}
                 {machine?.has_view_password && !retarget && (
                   <label className="check"><input type="checkbox" checked={d.clear_view}
@@ -351,7 +363,7 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
               <div className="stack-tight">
                 {text('vnc_control_password', 'Senha de operação', {
                   type: 'password', placeholder: keepHint(machine?.has_control_password),
-                  hint: 'Opcional. Quem a digitar pode assumir o controle da tela.', disabled: d.clear_control && !retarget,
+                  hint: opc ? 'Opcional. Quem a digitar pode assumir o controle da tela.' : 'Opcional. Quem a digitar pode assumir o controle da tela. Até 8 caracteres.', disabled: d.clear_control && !retarget,
                 })}
                 {machine?.has_control_password && !retarget && (
                   <label className="check"><input type="checkbox" checked={d.clear_control}

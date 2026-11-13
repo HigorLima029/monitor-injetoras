@@ -84,12 +84,9 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
     }
   }, [sid])
 
+  // Antes de conectar também se lê o status: na Beckhoff ele diz em que passo está a ponte do CERHost.
   useEffect(() => {
-    if (estado !== 'conectado') {
-      setStatus(null)
-      setConfirmar(false)
-      return
-    }
+    if (estado !== 'conectado') setConfirmar(false)
     void atualizar()
     const id = window.setInterval(atualizar, 2000)
     return () => window.clearInterval(id)
@@ -132,6 +129,23 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
   }
   const reconectar = useCallback(() => setSid(novoSid()), [])
 
+  // Beckhoff: enquanto a ponte não conecta, o estado dela explica melhor que o erro genérico de VNC.
+  const ponte = status?.bridge && status.bridge.state !== 'connected' ? status.bridge : null
+  const ponteFalhou = ponte?.state === 'missing' || ponte?.state === 'error'
+  const ponteTexto = !ponte ? '' : ponteFalhou
+    ? (ponte.error || 'Não foi possível abrir a tela da Beckhoff.')
+    : ponte.state === 'connecting' ? 'Conectando ao painel…' : 'Abrindo a tela da Beckhoff…'
+  const ponteOk = status?.bridge?.state === 'connected'
+  // A ponte ficou pronta depois de a conexão ter falhado: tenta de novo sozinho.
+  const eraPonteTroca = useRef(false)
+  useEffect(() => {
+    if (ponte) eraPonteTroca.current = true
+    else if (ponteOk && eraPonteTroca.current && estado === 'erro') {
+      eraPonteTroca.current = false
+      reconectar()
+    } else if (ponteOk && estado === 'conectado') eraPonteTroca.current = false
+  }, [ponte, ponteOk, estado, reconectar])
+
   const outro = status?.controller && !status.controller.me ? status.controller : null
   const podeOperar = status?.role === 'control' && status.control_available
 
@@ -143,7 +157,7 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
           <p>A tela real da IHM, pelo VNC do painel. A senha de visualização só mostra a tela; a de operação permite assumir o controle.</p>
         </div>
         <span className="spacer" />
-        {status && (
+        {status && estado === 'conectado' && (
           <span className="live-flag" title="Pessoas assistindo agora">
             <Users size={16} aria-hidden="true" /> {status.viewers} assistindo
           </span>
@@ -196,7 +210,7 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
       {aviso && <div className="vnc-bar" role="alert">{aviso}</div>}
 
       <div className={`panel vnc-panel${operando ? ' operando' : ''}`}>
-        {estado === 'senha' && (
+        {estado === 'senha' && !ponte && (
           <form className="vnc-overlay" onSubmit={enviarSenha}>
             <KeyRound size={22} aria-hidden="true" />
             <label htmlFor="vnc-senha">Senha do painel (visualização ou operação)</label>
@@ -205,8 +219,16 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
             <p className="muted small">A senha não é guardada no navegador.</p>
           </form>
         )}
-        {estado === 'conectando' && <div className="vnc-overlay muted">Conectando ao painel…</div>}
-        {estado === 'erro' && (
+        {ponte && estado !== 'conectado' && (
+          ponteFalhou ? (
+            <div className="vnc-overlay" role="alert">
+              <p>{ponteTexto}</p>
+              <button className="btn" onClick={reconectar}><RefreshCw size={16} aria-hidden="true" /> Tentar de novo</button>
+            </div>
+          ) : <div className="vnc-overlay muted" role="status">{ponteTexto}</div>
+        )}
+        {!ponte && estado === 'conectando' && <div className="vnc-overlay muted">Conectando ao painel…</div>}
+        {!ponte && estado === 'erro' && (
           <div className="vnc-overlay">
             <p>{detalhe || 'Não foi possível abrir a tela.'}</p>
             <p className="muted small">Confira se o painel está ligado, se a porta VNC responde e as senhas no cadastro da máquina (página Máquinas).</p>
