@@ -1,6 +1,8 @@
 import asyncio
 import struct
 
+import pytest
+
 from app.ads_source import ADS_ALARMS, AdsSource
 from app.tags import alarm_label
 
@@ -74,4 +76,75 @@ def test_fecha_conexao():
         await src.connect()
         await src.close()
         assert plc.opened == 1 and plc.closed == 1
+    asyncio.run(run())
+
+
+def _src(plc):
+    return AdsSource("1.2.3.4.1.1", "10.0.0.5", plc_factory=lambda *a: plc)
+
+
+def test_tag_desconhecida_e_none_e_alarme_inativo_e_zero():
+    async def run():
+        src = _src(FakePlc())
+        await src.connect()
+        v = await src.read(["TagInventada", "WarnAdsXYZ", "TempZ9", "WarnAds419", "GoodProduction", "BadProduction"])
+        assert v["TagInventada"] is None and v["WarnAdsXYZ"] is None and v["TempZ9"] is None
+        assert v["WarnAds419"] == 0.0
+        assert v["GoodProduction"] == 118 and v["BadProduction"] == 2
+    asyncio.run(run())
+
+
+def test_simbolo_escalar_ausente_so_afeta_aquela_tag():
+    async def run():
+        plc = FakePlc()
+        del plc.escalares[".NGOODPARTS"]
+        src = _src(plc)
+        await src.connect()
+        v = await src.read(["GoodProduction", "BadProduction", "TempZ5"])
+        assert v["GoodProduction"] is None
+        assert v["BadProduction"] == 2 and v["TempZ5"] == 195.0
+    asyncio.run(run())
+
+
+def test_bloco_ausente_da_none_sem_derrubar_o_resto():
+    async def run():
+        plc = FakePlc()
+        del plc.blocos[".STHMIMESSAGE"]
+        src = _src(plc)
+        await src.connect()
+        v = await src.read(["CycleMonitor", "WarnAds318"])
+        assert v["CycleMonitor"] == 24.5 and v["WarnAds318"] is None
+    asyncio.run(run())
+
+
+def test_falha_total_levanta():
+    async def run():
+        class Morto(FakePlc):
+            def read_by_name(self, *a):
+                raise ConnectionError("sem rota")
+
+            def get_symbol(self, *a):
+                raise ConnectionError("sem rota")
+        src = _src(Morto())
+        await src.connect()
+        with pytest.raises(ConnectionError):
+            await src.read(["CycleMonitor", "TempZ1", "WarnAds318"])
+    asyncio.run(run())
+
+
+def test_read_sem_connect_levanta_erro_claro():
+    async def run():
+        with pytest.raises(RuntimeError, match="nao conectado"):
+            await _src(FakePlc()).read(["CycleMonitor"])
+    asyncio.run(run())
+
+
+def test_connect_duas_vezes_fecha_a_anterior():
+    async def run():
+        plcs = [FakePlc(), FakePlc()]
+        it = iter(plcs)
+        src = AdsSource("1.2.3.4.1.1", "10.0.0.5", plc_factory=lambda *a: next(it))
+        await src.connect()
+        await src.connect()
+        assert plcs[0].closed == 1 and plcs[1].closed == 0
     asyncio.run(run())

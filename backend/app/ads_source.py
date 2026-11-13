@@ -6,6 +6,8 @@ IMPORTANTE: este módulo só LÊ variáveis do PLC. Não existe escrita e não d
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import logging
 import struct
 
 try:  # pyads só é necessário com PLC real; os testes usam um PLC falso
@@ -34,7 +36,7 @@ ZONE_STRIDE = 112          # bytes por zona em .AAAPFWTEMPPPARAMFROMHMI
 MSG_ROWS = 100
 MSG_ROW_SIZE = 96          # bytes por linha em .STHMIMESSAGE
 MSG_TIME_OFFSET = 56
-MSG_TIME_LEN = 24
+MSG_TIME_LEN = 23
 
 # tag -> (símbolo no PLC, tipo pyads)
 _SCALARS = {
@@ -53,6 +55,16 @@ FIXED_TAGS = (
 )
 
 
+log = logging.getLogger(__name__)
+
+# open_port/set_local_address sao globais do processo: so uma vez.
+_porta_aberta = False
+
+
+def _plctype(kind: str):
+    return getattr(pyads, f"PLCTYPE_{kind}") if pyads is not None else kind
+
+
 def _default_factory(net_id: str, port: int, host: str):
     return pyads.Connection(net_id, port, host)
 
@@ -67,16 +79,19 @@ class AdsSource:
         self._factory = plc_factory
         self._plc = None
         self._seen_alarms: set[int] = set()
+        self._logged: set[str] = set()
 
     async def connect(self) -> None:
+        global _porta_aberta
+        await self.close()  # nao vaza uma conexao anterior
         factory = self._factory
         if factory is None:
             if pyads is None:
-                raise RuntimeError("pyads nao instalado")
-            # Estado global do pyads: so ajusta o endereco local quando informado.
-            if self.local_net_id:
+                raise RuntimeError("pyads nao instalado: necessario para conectar ao PLC Beckhoff")
+            if self.local_net_id and not _porta_aberta:
                 pyads.open_port()
                 pyads.set_local_address(self.local_net_id)
+                _porta_aberta = True
             factory = _default_factory
         plc = factory(self.ams_net_id, self.port, self.host)
         await asyncio.to_thread(plc.open)
@@ -96,41 +111,73 @@ class AdsSource:
 
     # --- leitura (bloqueante, roda em thread) ---
 
-    def _read_block(self, symbol: str, size: int) -> bytes:
-        sym = self._plc.get_symbol(symbol)
-        tipo = pyads.PLCTYPE_BYTE * size  # tamanho calculado antes, evita erro de precedência
-        return bytes(self._plc.read(sym.index_group, sym.index_offset, tipo))
+    def _read_block(self, plc, symbol: str, size: int) -> bytes:
+        sym = plc.get_symbol(symbol)
+        tipo = ctypes.c_ubyte * size  # mesmo que PLCTYPE_BYTE * size; tamanho calculado antes
+        return bytes(plc.read(sym.index_group, sym.index_offset, tipo))
+
+    def _falha(self, chave: str, exc: Exception) -> None:
+        if chave not in self._logged:  # avisa uma vez, nao a cada leitura
+            self._logged.add(chave)
+            log.warning("ADS %s: leitura de %s falhou: %s", self.host, chave, exc)
 
     def _read_all(self, tags: list[str]) -> dict[str, object]:
-        assert self._plc is not None
+        plc = self._plc
+        if plc is None:
+            raise RuntimeError("AdsSource nao conectado")
         out: dict[str, object] = {}
+        tentativas = 0
+        erros: list[Exception] = []
+
         for tag in tags:
             if tag in _SCALARS:
                 name, kind = _SCALARS[tag]
-                out[tag] = self._plc.read_by_name(name, getattr(pyads, f"PLCTYPE_{kind}"))
+                tentativas += 1
+                try:
+                    out[tag] = plc.read_by_name(name, _plctype(kind))
+                except Exception as exc:
+                    erros.append(exc)
+                    self._falha(name, exc)
+
         if any(t.startswith(("TempZ", "StandbyTempZ")) for t in tags):
-            raw = self._read_block(_TEMP_SYMBOL, ZONES * ZONE_STRIDE)
-            for z in range(1, ZONES + 1):
-                base = (z - 1) * ZONE_STRIDE
-                out[f"TempZ{z}"] = struct.unpack_from("<d", raw, base)[0]
-                out[f"StandbyTempZ{z}"] = struct.unpack_from("<d", raw, base + 8)[0]
+            tentativas += 1
+            try:
+                raw = self._read_block(plc, _TEMP_SYMBOL, ZONES * ZONE_STRIDE)
+                for z in range(1, ZONES + 1):
+                    base = (z - 1) * ZONE_STRIDE
+                    out[f"TempZ{z}"] = struct.unpack_from("<d", raw, base)[0]
+                    out[f"StandbyTempZ{z}"] = struct.unpack_from("<d", raw, base + 8)[0]
+            except Exception as exc:
+                erros.append(exc)
+                self._falha(_TEMP_SYMBOL, exc)
+
         if any(t.startswith(ALARM_PREFIX_ADS) for t in tags):
-            raw = self._read_block(_MSG_SYMBOL, MSG_ROWS * MSG_ROW_SIZE)
-            active: set[int] = set()
-            for row in range(MSG_ROWS):
-                base = row * MSG_ROW_SIZE
-                hora = raw[base + MSG_TIME_OFFSET: base + MSG_TIME_OFFSET + MSG_TIME_LEN]
-                if not hora.split(b"\x00")[0].decode("latin1", "ignore").strip():
-                    continue
-                active.add(struct.unpack_from("<i", raw, base)[0])
-            self._seen_alarms |= active
-            for tag in tags:
-                if tag.startswith(ALARM_PREFIX_ADS):
-                    try:
-                        out[tag] = 1.0 if int(tag[len(ALARM_PREFIX_ADS):]) in active else 0.0
-                    except ValueError:
-                        out[tag] = 0.0
-        return {t: out.get(t, 0.0) for t in tags}
+            tentativas += 1
+            try:
+                raw = self._read_block(plc, _MSG_SYMBOL, MSG_ROWS * MSG_ROW_SIZE)
+                active: set[int] = set()
+                for row in range(MSG_ROWS):
+                    base = row * MSG_ROW_SIZE
+                    hora = raw[base + MSG_TIME_OFFSET: base + MSG_TIME_OFFSET + MSG_TIME_LEN]
+                    if not hora.split(b"\x00")[0].decode("latin1", "ignore").strip():
+                        continue
+                    active.add(struct.unpack_from("<i", raw, base)[0])
+                self._seen_alarms |= active
+                for tag in tags:
+                    if tag.startswith(ALARM_PREFIX_ADS):
+                        try:
+                            alarm_id = int(tag[len(ALARM_PREFIX_ADS):])
+                        except ValueError:
+                            continue  # tag desconhecida: fica sem valor
+                        out[tag] = 1.0 if alarm_id in active else 0.0
+            except Exception as exc:
+                erros.append(exc)
+                self._falha(_MSG_SYMBOL, exc)
+
+        if tentativas and len(erros) == tentativas:
+            # Nada foi lido: falha de conexao, o coletor reconecta.
+            raise erros[-1]
+        return {t: out.get(t) for t in tags}
 
     async def read(self, tags: list[str]) -> dict[str, object]:
         return await asyncio.to_thread(self._read_all, tags)
