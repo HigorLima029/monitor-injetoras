@@ -1,5 +1,5 @@
 import { AlertTriangle, Factory, Server, MonitorPlay, LayoutDashboard, ListTree, Monitor, Moon, Package, Sun, SunMoon, Thermometer } from 'lucide-react'
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { Info, MachineList } from './api'
 import { activateMachine, getJson, usePoll, useLive } from './api'
 import { MachinesPage } from './MachinesPage'
@@ -41,6 +41,10 @@ export default function App() {
   const [now, setNow] = useState(() => Date.now() / 1000)
   const [switchError, setSwitchError] = useState<string | null>(null)
   const [changedNotice, setChangedNotice] = useState<string | null>(null)
+  // Máquina que esta aba está mostrando: a faixa "mudou" só aparece se a nova for outra
+  // (reabrir a mesma máquina, ex. depois de editar o IP ou reiniciar, não é uma troca).
+  const shownId = useRef<number | null>(null)
+  useEffect(() => { if (info) shownId.current = info.machine_id ?? null }, [info])
 
   useEffect(() => {
     const id = window.setInterval(() => setNow(Date.now() / 1000), 1000)
@@ -61,6 +65,7 @@ export default function App() {
     if (changeSeq === 0) return
     let stale = false
     const wait = (ms: number) => new Promise((done) => window.setTimeout(done, ms))
+    const before = shownId.current
     ;(async () => {
       reloadMachines()
       let fresh: Info | null = null
@@ -77,7 +82,8 @@ export default function App() {
       if (stale) return
       reloadMachines()
       const name = fresh?.machine_name ?? list?.machines.find((m) => m.id === changedTo)?.name
-      if (name) setChangedNotice(`A máquina aberta mudou para ${name}.`)
+      const reallyChanged = changedTo === null || before === null || changedTo !== before
+      if (name && reallyChanged) setChangedNotice(`A máquina aberta mudou para ${name}.`)
     })()
     return () => { stale = true }
   }, [changeSeq, changedTo, reloadInfo, reloadMachines, setInfo])

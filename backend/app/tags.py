@@ -54,8 +54,15 @@ BARREL_ZONES: list[tuple[str, str, str, str, str]] = [
 
 SETPOINT_TAGS = sorted({t for z in BARREL_ZONES for t in z[2:]} | {"TempOil", "MaxTempOil"})
 
+# Beckhoff (XMold): 8 zonas, sem bico separado. Mesmo formato de BARREL_ZONES.
+ADS_ZONES: list[tuple[str, str, str, str, str]] = [
+    (f"Zona {z}", f"TempZ{z}Now", f"TempZ{z}", f"MinTempZ{z}", f"MaxTempZ{z}") for z in range(1, 9)
+]
+# Setpoints que só existem nas máquinas com mais de 5 zonas.
+EXTRA_SETPOINT_TAGS = ["TempZ6", "TempZ7", "TempZ8"]
+
 # Tags gravadas no histórico (SQLite) a cada leitura.
-HISTORY_TAGS = [t[0] for t in KPI_TAGS] + SETPOINT_TAGS
+HISTORY_TAGS = [t[0] for t in KPI_TAGS] + SETPOINT_TAGS + EXTRA_SETPOINT_TAGS
 
 ALARM_PREFIX = "Warn"
 

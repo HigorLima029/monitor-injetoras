@@ -192,3 +192,20 @@ def test_put_na_ativa_sem_mudar_conexao_nao_reativa(api):
             if msg.get("type") == "machine_changed":
                 break
         assert msg["machine_id"] == a
+
+
+def test_beckhoff_mostra_8_zonas_sem_bico(tmp_path):
+    from app.sources import SimulatedSource
+    store = MachineStore(str(tmp_path / "m.db"))
+    m = store.add(Machine(None, "Beckhoff", "ads", "127.0.0.1", ams_net_id="5.79.97.240.1.1")).id
+    store.set_active(m)
+    # fonte simulada no lugar do pyads: o teste olha so o formato das zonas
+    main.app.state.manager = MachineManager(store, _settings(tmp_path),
+                                            source_factory=lambda _m: SimulatedSource())
+    try:
+        with TestClient(main.app) as client:
+            zones = client.get("/api/info").json()["zones"]
+    finally:
+        del main.app.state.manager
+    assert [z["label"] for z in zones] == [f"Zona {i}" for i in range(1, 9)]
+    assert zones[7]["setpoint"] == "TempZ8"

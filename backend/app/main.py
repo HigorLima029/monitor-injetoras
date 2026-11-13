@@ -18,7 +18,7 @@ from .config import settings
 from .machines import CONNECTION_FIELDS, Machine, MachineStore, seed_from_settings
 from .manager import MachineManager
 from .vnc_hub import VncHub, WebSocketTransport
-from .tags import ALARM_PREFIX, BARREL_ZONES, KPI_META, alarm_label, humanize
+from .tags import ADS_ZONES, ALARM_PREFIX, BARREL_ZONES, KPI_META, alarm_label, humanize
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -201,8 +201,11 @@ def info():
 
 
 def _zones():
-    """CHY: bico + 5 zonas fixas. B&R (Euromap 63): so as zonas ligadas no painel, sem bico."""
+    """CHY: bico + 5 zonas fixas. Beckhoff: 8 zonas, sem bico.
+    B&R (Euromap 63): so as zonas ligadas no painel, sem bico."""
     m = _machine(app)
+    if m.profile == "ads":
+        return ADS_ZONES
     if m.profile != "em63":
         return BARREL_ZONES
     zones = [z for z in BARREL_ZONES if z[0] != "Bico"]
