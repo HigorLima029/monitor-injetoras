@@ -59,7 +59,8 @@ class StreamTransport:
         self.writer.write(data)
         await self.writer.drain()
 
-    async def close(self) -> None:
+    async def close(self, reason: str | None = None) -> None:
+        # VNC comum nao tem como dar o motivo depois do aperto de maos: so fecha
         self.writer.close()
         with contextlib.suppress(Exception):
             await self.writer.wait_closed()
@@ -85,9 +86,12 @@ class WebSocketTransport:
     async def write(self, data: bytes) -> None:
         await self.ws.send_bytes(data)
 
-    async def close(self) -> None:
+    async def close(self, reason: str | None = None) -> None:
         with contextlib.suppress(Exception):
-            await self.ws.close()
+            if reason:
+                await self.ws.close(code=1000, reason=reason)  # o navegador mostra o motivo
+            else:
+                await self.ws.close()
 
 
 # ------------------------------------------------------------------ imagem
@@ -311,6 +315,7 @@ class VncHub:
         self._tcp_server: asyncio.base_events.Server | None = None
         self._closed = False
         self.tcp_port = 0
+        self.tcp_auto_take = True
 
     @property
     def ready(self) -> bool:
@@ -320,12 +325,13 @@ class VncHub:
     def audit(self, text: str) -> None:
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         self.events.append({"time": time.time(), "text": text})
-        log.info("VNC: %s", text)
+        machine = f"[{self.name} {self.host}:{self.port}]"  # o registro e um so para todas as maquinas
+        log.info("VNC %s %s", machine, text)
         if self.audit_path:
             try:
                 Path(self.audit_path).parent.mkdir(parents=True, exist_ok=True)
                 with open(self.audit_path, "a", encoding="utf-8") as fh:
-                    fh.write(f"{stamp} {text}\n")
+                    fh.write(f"{stamp} {machine} {text}\n")
             except OSError as exc:
                 log.warning("VNC: nao consegui gravar o registro (%s)", exc)
 
@@ -603,22 +609,27 @@ class VncHub:
                 raise VncError(f"mensagem desconhecida do painel: tipo {kind}")
 
     # ---------------- porta VNC comum (Espelho IHM)
-    async def start_tcp(self, bind: str, port: int) -> None:
+    async def start_tcp(self, bind: str, port: int, auto_take: bool = True) -> None:
+        """Porta VNC comum. auto_take=False: a senha de operacao so assiste (o primeiro toque nao assume)."""
+        self.tcp_auto_take = auto_take
+
         async def handle(reader, writer):
             peer = writer.get_extra_info("peername")
             label = f"{peer[0]} (VNC)" if peer else "VNC"
-            await self.serve(StreamTransport(reader, writer), f"tcp-{os.urandom(6).hex()}", label, auto_take=True)
+            await self.serve(StreamTransport(reader, writer), f"tcp-{os.urandom(6).hex()}", label,
+                             auto_take=self.tcp_auto_take)
 
         self._tcp_server = await asyncio.start_server(handle, bind, port)
         self.tcp_port = self._tcp_server.sockets[0].getsockname()[1]
-        log.info("VNC: hub aceitando clientes VNC em %s:%s", bind, self.tcp_port)
+        log.info("VNC: hub aceitando clientes VNC em %s:%s%s", bind, self.tcp_port,
+                 "" if auto_take else " (so visualizacao)")
 
-    async def close(self) -> None:
+    async def close(self, reason: str | None = None) -> None:
         self._closed = True
         if self._tcp_server:
             self._tcp_server.close()
         for s in list(self.sessions.values()):
-            await s.transport.close()
+            await s.transport.close(reason)
         for task in (self._watch_task, self._stop_task):
             if task:
                 task.cancel()

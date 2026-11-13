@@ -261,3 +261,94 @@ def test_ws_e_api_de_controle(tmp_path, monkeypatch, panel):
             assert st["controller"]["me"] is True and st["role"] == "control"
             assert client.post("/api/vnc/control", json={"sid": "op1", "action": "release"}).json()["ok"]
             assert client.get("/api/vnc/status", params={"sid": "op1"}).json()["controller"] is None
+
+
+def test_porta_tcp_sem_auto_assumir(panel):
+    async def run():
+        hub = VncHub("127.0.0.1", panel.port, VIEW, CONTROL, idle_grace=0.2, min_interval=0.02)
+        await hub.start_tcp("127.0.0.1", 0, auto_take=False)
+        try:
+            op = await Viewer.connect(hub.tcp_port, CONTROL)
+            await op.frame()
+            op.key(0x41)
+            op.click()
+            await asyncio.sleep(0.3)
+            assert hub.controller is None and hub.mode == "view" and panel.applied() == []
+            op.close()
+        finally:
+            await hub.close()
+    asyncio.run(run())
+
+
+def test_registro_identifica_a_maquina(tmp_path, panel):
+    async def run():
+        log_path = tmp_path / "audit.log"
+        hub = VncHub("127.0.0.1", panel.port, VIEW, CONTROL, name="Injetora 7",
+                     audit_path=str(log_path), idle_grace=0.2, min_interval=0.02)
+        await hub.start_tcp("127.0.0.1", 0)
+        try:
+            assert await Viewer.connect(hub.tcp_port, "chute") == "Senha incorreta."
+            v = await Viewer.connect(hub.tcp_port, VIEW)
+            await v.frame()
+            v.close()
+            await _until(lambda: len(log_path.read_text().splitlines()) >= 3)
+            await _until(lambda: panel.active == 0 and hub.state == "idle", timeout=4)
+        finally:
+            await hub.close()
+        linhas = log_path.read_text(encoding="utf-8").splitlines()
+        assert linhas and all(f"[Injetora 7 127.0.0.1:{panel.port}] " in l for l in linhas)
+        assert VIEW not in log_path.read_text() and CONTROL not in log_path.read_text()
+    asyncio.run(run())
+
+
+def test_fechar_hub_manda_o_motivo():
+    async def run():
+        class T:
+            reason = "nada"
+
+            async def close(self, reason=None):
+                self.reason = reason
+
+        from app.vnc_hub import Session
+        hub = VncHub("127.0.0.1", 1, VIEW)
+        t = T()
+        hub.sessions["x"] = Session(hub, t, "x", "teste")
+        await hub.close("máquina trocada")
+        assert t.reason == "máquina trocada"
+    asyncio.run(run())
+
+
+def test_troca_de_maquina_avisa_o_navegador(tmp_path, monkeypatch, panel):
+    from types import SimpleNamespace
+
+    from fastapi.testclient import TestClient
+    from starlette.websockets import WebSocketDisconnect
+
+    from app import main
+    from app.machines import Machine, MachineStore
+    from app.manager import MachineManager
+    from app.sources import SimulatedSource
+
+    cfg = SimpleNamespace(
+        machines_dir=str(tmp_path / "machines"), poll_seconds=1, full_poll_seconds=60,
+        retention_days=7, vnc_tcp_port=0, vnc_tcp_bind="127.0.0.1", vnc_control_timeout=300,
+        vnc_audit_path=None, ads_local_net_id="")
+    store = MachineStore(str(tmp_path / "m.db"))
+    a, b = (store.add(Machine(None, n, "em63", "127.0.0.1", vnc_enabled=True, vnc_port=panel.port,
+                              vnc_view_password=VIEW)).id for n in "AB")
+    store.set_active(a)
+    monkeypatch.setattr(main.app.state, "manager", MachineManager(
+        store, cfg, source_factory=lambda m: SimulatedSource(seed=2)), raising=False)
+    with TestClient(main.app) as client:
+        with client.websocket_connect("/ws/vnc?sid=olho", subprotocols=["binary"]) as ws:
+            assert ws.receive_bytes() == b"RFB 003.008\n"
+            ws.send_bytes(b"RFB 003.008\n")
+            assert ws.receive_bytes() == b"\x01\x02"
+            ws.send_bytes(b"\x02")
+            ws.send_bytes(vnc_response(VIEW, ws.receive_bytes()))
+            assert ws.receive_bytes() == b"\x00\x00\x00\x00"
+            assert client.post(f"/api/machines/{b}/activate").status_code == 200
+            with pytest.raises(WebSocketDisconnect) as exc:
+                for _ in range(20):
+                    ws.receive_bytes()
+            assert exc.value.reason == "máquina trocada"

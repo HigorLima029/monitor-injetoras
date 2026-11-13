@@ -265,3 +265,79 @@ def test_falha_ao_parar_coletor_ainda_fecha_hub(tmp_path):
             store.close()
 
     asyncio.run(run())
+
+
+def test_ads_nao_monta_hub_vnc_ainda(tmp_path):
+    store, mgr, _ = _setup(tmp_path, [])
+    m = Machine(1, "Bk", "ads", "10.0.0.7", vnc_enabled=True, vnc_view_password="v")
+    assert mgr._new_hub(m) is None
+    assert mgr._new_hub(Machine(2, "BR", "em63", "10.0.0.8", vnc_view_password="v")) is not None
+    store.close()
+
+
+def test_probe_all_pula_demo_e_a_ativa(tmp_path):
+    async def run():
+        from app.sources import SimulatedSource
+        ms = [Machine(None, "A", "chy", "10.0.0.1"), _demo("B"), Machine(None, "C", "chy", "10.0.0.3")]
+        store, mgr, (a, b, c) = _setup(tmp_path, ms, source_factory=lambda m: SimulatedSource())
+        sondados = []
+
+        async def probe(host, port, timeout=3.0):
+            sondados.append(host)
+            return 1.0
+
+        mgr.probe = probe
+        try:
+            await mgr.activate(a)
+            await mgr.probe_all()
+            assert sondados == ["10.0.0.3"]
+            assert mgr.status_of(c)["online"] is True
+        finally:
+            await mgr.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def _free_port():
+    import socket
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        return s.getsockname()[1]
+
+
+def test_porta_vnc_so_assume_no_hub_da_subida(tmp_path):
+    async def run():
+        ms = [Machine(None, n, "em63", "127.0.0.1", vnc_port=59999, vnc_view_password="vista",
+                      vnc_control_password="op") for n in "AB"]
+        store, mgr, (a, b) = _setup(tmp_path, ms)
+        store.set_active(a)
+        mgr.settings.vnc_tcp_port = _free_port()
+        try:
+            await mgr.start()
+            assert mgr.hub.tcp_auto_take is True  # hub da subida: como antes
+            await mgr.activate(b)
+            assert mgr.hub.tcp_auto_take is False  # depois de uma troca: 5901 só visualização
+            await mgr.activate(a)
+            assert mgr.hub.tcp_auto_take is False
+        finally:
+            await mgr.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_refresh_atualiza_sem_reabrir(tmp_path):
+    async def run():
+        store, mgr, (a,) = _setup(tmp_path, [_demo("A")])
+        try:
+            await mgr.activate(a)
+            c = mgr.collector
+            store.update(a, {"name": "A2"})
+            await mgr.refresh(a)
+            assert mgr.machine.name == "A2" and mgr.collector is c
+        finally:
+            await mgr.stop()
+            store.close()
+
+    asyncio.run(run())

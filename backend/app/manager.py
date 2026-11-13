@@ -18,7 +18,8 @@ log = logging.getLogger(__name__)
 
 PROBE_INTERVAL = 30.0
 PROBE_TIMEOUT = 3.0
-CLOSE_TIMEOUT = 5.0
+CLOSE_TIMEOUT = 5.0  # maior que o limite do disconnect() das fontes OPC-UA (4 s)
+SWITCH_REASON = "máquina trocada"
 
 
 class MachineManager:
@@ -39,7 +40,7 @@ class MachineManager:
         active = self.store.active_id()
         if active is not None and self.store.get(active) is not None:
             try:
-                await self.activate(active)
+                await self.activate(active, at_startup=True)
             except Exception:  # o servidor precisa subir mesmo sem a máquina ativa
                 log.exception("falha ao abrir a máquina ativa %s", active)
         self._status_task = asyncio.create_task(self._status_loop(), name="status-maquinas")
@@ -80,8 +81,11 @@ class MachineManager:
             raise
 
     def _new_hub(self, m: Machine) -> VncHub | None:
-        """Tela ao vivo: só com VNC ligado, fora do modo demo e com a senha de visualização."""
-        if m.kind == "demo" or not m.effective_vnc_enabled:
+        """Tela ao vivo: só com VNC ligado, fora do modo demo e com a senha de visualização.
+
+        Beckhoff (ads) fica sem tela até a Fase 2.
+        """
+        if m.kind in ("demo", "ads") or not m.effective_vnc_enabled:
             return None
         if not m.vnc_view_password:
             log.warning("Tela ao vivo desligada para %s: sem senha de visualização", m.name)
@@ -111,9 +115,15 @@ class MachineManager:
                     old_c.storage.close()
             finally:
                 if old_h is not None:
-                    await self._bounded("hub VNC", old_h.close())
+                    await self._bounded("hub VNC", old_h.close(SWITCH_REASON))
 
-    async def activate(self, machine_id: int) -> Machine:
+    async def activate(self, machine_id: int, at_startup: bool = False) -> Machine:
+        """Abre a máquina (fechando a anterior).
+
+        Só o hub aberto na subida do servidor deixa a porta VNC comum assumir o controle no primeiro
+        toque. Depois de uma troca, um Espelho IHM que reconecta sozinho cairia na outra máquina:
+        ali a porta fica só visualização (operar continua possível pela Tela ao vivo).
+        """
         async with self._lock:
             m = self.store.get(machine_id)
             if m is None:
@@ -129,7 +139,8 @@ class MachineManager:
                 collector.start()  # não espera a conexão: o coletor continua tentando
                 if hub is not None and self.settings.vnc_tcp_port:
                     try:
-                        await hub.start_tcp(self.settings.vnc_tcp_bind, self.settings.vnc_tcp_port)
+                        await hub.start_tcp(self.settings.vnc_tcp_bind, self.settings.vnc_tcp_port,
+                                            auto_take=at_startup)
                     except OSError as exc:
                         log.warning("porta VNC %s indisponível (%s)", self.settings.vnc_tcp_port, exc)
                 self.store.set_active(machine_id)
@@ -142,6 +153,16 @@ class MachineManager:
             self.machine, self.collector, self.hub = m, collector, hub
             log.info("máquina ativa: %s (id %s)", m.name, m.id)
             return m
+
+    async def refresh(self, machine_id: int) -> None:
+        """Cadastro mudou sem mexer na conexão (nome, cliente, notas): atualiza sem reabrir."""
+        async with self._lock:
+            if self.machine is not None and self.machine.id == machine_id:
+                m = self.store.get(machine_id)
+                if m is not None:
+                    self.machine = m
+                    if self.hub is not None:
+                        self.hub.name = m.name
 
     # ---- status ---------------------------------------------------------
     def status_of(self, machine_id: int) -> dict:
@@ -174,11 +195,14 @@ class MachineManager:
         return latency
 
     async def probe_all(self) -> None:
+        """Sonda as outras máquinas: a aberta já tem o coletor, e a simulada não tem rede."""
         machines = self.store.list()
+        active = self.machine.id if self.machine is not None else None
+        targets = [m for m in machines if m.kind != "demo" and m.id != active]
         results = await asyncio.gather(
-            *(self.probe(m.host, m.status_port) for m in machines), return_exceptions=True)
+            *(self.probe(m.host, m.status_port) for m in targets), return_exceptions=True)
         now = time.time()
-        for m, r in zip(machines, results):
+        for m, r in zip(targets, results):
             self._probes[m.id] = (r if isinstance(r, float) else None, now)
         keep = {m.id for m in machines}
         for gone in [i for i in self._probes if i not in keep]:

@@ -149,3 +149,42 @@ def test_seed_copia_falha_nao_bloqueia(tmp_path, store):
     seed_from_settings(store, _settings(tmp_path), str(tmp_path / "blocker" / "sub"))
     assert len(store.list()) == 1
     assert store.active_id() is not None
+
+
+def test_trocar_ip_ou_porta_sem_senha_nova_apaga_as_senhas(store):
+    m = store.add(Machine(None, "A", "em63", "1.1.1.1", vnc_view_password="v", vnc_control_password="c"))
+    store.update(m.id, {"name": "B", "vnc_view_password": ""})  # sem trocar o alvo: mantém
+    assert (store.get(m.id).vnc_view_password, store.get(m.id).vnc_control_password) == ("v", "c")
+    store.update(m.id, {"host": "6.6.6.6"})
+    got = store.get(m.id)
+    assert (got.vnc_view_password, got.vnc_control_password) == ("", "")
+    store.update(m.id, {"vnc_view_password": "v2", "vnc_control_password": "c2"})
+    store.update(m.id, {"vnc_port": 5999, "vnc_view_password": "v3"})  # só a nova vale; a outra some
+    got = store.get(m.id)
+    assert (got.vnc_view_password, got.vnc_control_password) == ("v3", "")
+    store.update(m.id, {"host": "6.6.6.6", "vnc_port": 5999})  # mesmos valores: não é troca
+    assert store.get(m.id).vnc_view_password == "v3"
+
+
+def test_remover_senha_explicito(store):
+    m = store.add(Machine(None, "A", "em63", "1.1.1.1", vnc_view_password="v", vnc_control_password="c"))
+    store.update(m.id, {"clear_vnc_control_password": True})
+    assert (store.get(m.id).vnc_view_password, store.get(m.id).vnc_control_password) == ("v", "")
+    store.update(m.id, {"clear_vnc_view_password": True, "clear_vnc_control_password": False})
+    assert store.get(m.id).vnc_view_password == ""
+    with pytest.raises(ValueError):
+        store.update(m.id, {"vnc_view_password": "x", "clear_vnc_view_password": True})
+
+
+def test_update_none_em_campo_obrigatorio_e_valueerror(store):
+    m = store.add(Machine(None, "A", "chy", "1.1.1.1", notes="n"))
+    for campo in ("name", "client", "notes", "ams_net_id", "host", "kind", "opcua_port"):
+        with pytest.raises(ValueError):
+            store.update(m.id, {campo: None})
+    assert store.update(m.id, {"namespace": None, "vnc_enabled": None}).notes == "n"
+
+
+@pytest.mark.parametrize("url", ["opc.tcp://10.0.0.5:abc", "opc.tcp://:4840", "lixo"])
+def test_seed_url_invalida_comeca_vazio(tmp_path, store, url):
+    seed_from_settings(store, _settings(tmp_path, opcua_url=url), str(tmp_path / "m"))
+    assert store.list() == [] and store.active_id() is None

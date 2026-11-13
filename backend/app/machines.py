@@ -15,6 +15,10 @@ KINDS = ("chy", "em63", "ads", "demo")
 _PROFILE = {"chy": "chy", "em63": "em63", "ads": "ads", "demo": "chy"}
 _NAMESPACE = {"chy": 1, "em63": 6, "ads": 1, "demo": 1}
 _SECRETS = ("vnc_view_password", "vnc_control_password")
+_NULLABLE = ("namespace", "vnc_enabled")  # None = padrão do tipo
+# Campos que mudam a conexão com a máquina: só eles exigem reabrir a máquina aberta.
+CONNECTION_FIELDS = ("kind", "host", "opcua_port", "namespace", "ams_net_id", "ads_port",
+                     "vnc_enabled", "vnc_port", *_SECRETS)
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS machines (
@@ -142,14 +146,33 @@ class MachineStore:
         return self.get(new_id)
 
     def update(self, id: int, changes: dict) -> Machine:
+        """Edição parcial. Senha vazia ou ausente = mantém a atual; clear_<senha>=True apaga.
+
+        Trocar o IP ou a porta VNC sem digitar a senha de novo apaga as senhas guardadas: senão,
+        quem edita o cadastro poderia apontar o hub para outro endereço e capturar a resposta VNC.
+        """
         cur = self.get(id)
         if cur is None:
             raise KeyError(id)
         data = {k: v for k, v in changes.items() if k in _FIELDS}
-        for s in _SECRETS:  # senha vazia ou ausente = mantém a atual
-            if not data.get(s):
+        for k, v in data.items():
+            if v is None and k not in _NULLABLE:
+                raise ValueError(f"{k} não pode ficar vazio")
+        fresh = {s for s in _SECRETS if data.get(s)}
+        for s in _SECRETS:
+            if s not in fresh:
                 data.pop(s, None)
+            if changes.get(f"clear_{s}"):
+                if s in fresh:
+                    raise ValueError("não dá para trocar e remover a mesma senha ao mesmo tempo")
+                data[s] = ""
         new = Machine(**{**asdict(cur), **data})
+        if (new.host, new.vnc_port) != (cur.host, cur.vnc_port):
+            gone = [s for s in _SECRETS if s not in fresh and getattr(new, s)]
+            for s in gone:
+                setattr(new, s, "")
+            if gone:
+                log.warning("máquina %s: IP ou porta VNC mudou sem senha nova; senhas VNC guardadas apagadas", id)
         _validate(new)
         sets = ", ".join(f"{f}=?" for f in _FIELDS)
         with self._lock, self._conn:
@@ -186,28 +209,11 @@ def seed_from_settings(store: MachineStore, settings, machines_dir: str) -> None
     """
     created: Machine | None = None
     if not store.list():
-        u = urlparse(settings.opcua_url)
-        host = u.hostname or ""
-        port = u.port or 4840
-        if settings.simulate:
-            kind = "demo"
-        else:
-            kind = settings.profile if settings.profile in ("chy", "em63", "ads") else "chy"
-        ns = settings.namespace if settings.namespace != 1 else None
-        notes = ""
-        vnc_host = (getattr(settings, "vnc_host", "") or "").strip()
-        if vnc_host and vnc_host != host:
-            notes = (f"VNC_HOST do .env antigo: {vnc_host} "
-                     "(diferente do IP OPC-UA; ajuste se necessário)")
-            log.warning("VNC_HOST %s difere do host OPC-UA %s; registrado em notes", vnc_host, host)
-        created = store.add(Machine(
-            None, settings.machine_name, kind, host,
-            opcua_port=port, namespace=ns, notes=notes,
-            vnc_enabled=getattr(settings, "vnc_enabled", None),
-            vnc_port=getattr(settings, "vnc_port", 5900),
-            vnc_view_password=getattr(settings, "vnc_view_password", ""),
-            vnc_control_password=getattr(settings, "vnc_control_password", ""),
-        ))
+        try:
+            created = _seed_machine(store, settings)
+        except ValueError as exc:  # OPCUA_URL inválido: sobe com o cadastro vazio
+            log.warning("não consegui importar a máquina do .env (OPCUA_URL inválido: %s); "
+                        "cadastre a máquina na página Máquinas", exc)
     machines = store.list()
     if not machines:
         return
@@ -227,3 +233,30 @@ def seed_from_settings(store: MachineStore, settings, machines_dir: str) -> None
                     shutil.copy2(src, dst)
         except Exception:  # cópia do histórico nunca bloqueia a inicialização
             log.exception("falha ao migrar histórico da máquina %s", created.id)
+
+
+def _seed_machine(store: MachineStore, settings) -> Machine:
+    u = urlparse(settings.opcua_url)
+    host = u.hostname or ""
+    if not host:
+        raise ValueError("sem IP/nome no endereço")
+    port = u.port or 4840  # porta malformada levanta ValueError
+    if settings.simulate:
+        kind = "demo"
+    else:
+        kind = settings.profile if settings.profile in ("chy", "em63", "ads") else "chy"
+    ns = settings.namespace if settings.namespace != 1 else None
+    notes = ""
+    vnc_host = (getattr(settings, "vnc_host", "") or "").strip()
+    if vnc_host and vnc_host != host:
+        notes = (f"VNC_HOST do .env antigo: {vnc_host} "
+                 "(diferente do IP OPC-UA; ajuste se necessário)")
+        log.warning("VNC_HOST %s difere do host OPC-UA %s; registrado em notes", vnc_host, host)
+    return store.add(Machine(
+        None, settings.machine_name, kind, host,
+        opcua_port=port, namespace=ns, notes=notes,
+        vnc_enabled=getattr(settings, "vnc_enabled", None),
+        vnc_port=getattr(settings, "vnc_port", 5900),
+        vnc_view_password=getattr(settings, "vnc_view_password", ""),
+        vnc_control_password=getattr(settings, "vnc_control_password", ""),
+    ))

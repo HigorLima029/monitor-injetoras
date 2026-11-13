@@ -15,7 +15,7 @@ from pydantic import BaseModel
 
 from .collector import Collector, to_number
 from .config import settings
-from .machines import Machine, MachineStore, seed_from_settings
+from .machines import CONNECTION_FIELDS, Machine, MachineStore, seed_from_settings
 from .manager import MachineManager
 from .vnc_hub import VncHub, WebSocketTransport
 from .tags import ALARM_PREFIX, BARREL_ZONES, KPI_META, alarm_label, humanize
@@ -103,6 +103,8 @@ class MachineUpdate(BaseModel):
     vnc_view_password: str | None = None
     vnc_control_password: str | None = None
     notes: str | None = None
+    clear_vnc_view_password: bool = False
+    clear_vnc_control_password: bool = False
 
 
 def _get_or_404(id: int) -> Machine:
@@ -133,7 +135,7 @@ def add_machine(body: MachineIn):
 @app.put("/api/machines/{id}")
 async def update_machine(id: int, body: MachineUpdate):
     mgr = _mgr(app)
-    _get_or_404(id)
+    before = _get_or_404(id)
     try:
         m = mgr.store.update(id, body.model_dump(exclude_unset=True))
     except KeyError:
@@ -141,7 +143,10 @@ async def update_machine(id: int, body: MachineUpdate):
     except ValueError as exc:
         raise HTTPException(422, str(exc))
     if mgr.machine is not None and mgr.machine.id == id:
-        await mgr.activate(id)  # aplica as mudancas na maquina aberta
+        if any(getattr(before, f) != getattr(m, f) for f in CONNECTION_FIELDS):
+            await mgr.activate(id)  # aplica as mudancas de conexao na maquina aberta
+        else:
+            await mgr.refresh(id)  # so nome, cliente ou notas: sem derrubar quem esta vendo
     return m.public()
 
 

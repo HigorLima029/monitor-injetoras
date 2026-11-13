@@ -153,3 +153,42 @@ def test_422_nao_ecoa_senhas(api):
     r = client.post("/api/machines", json={"name": "X", "kind": "plc", "host": "h",
                                            "vnc_view_password": "SEGREDO", "opcua_port": "abc"})
     assert r.status_code == 422 and "SEGREDO" not in r.text
+
+
+def test_put_troca_ip_apaga_senhas_e_remove_explicito(api):
+    client, store, a, b = api
+    m = store.add(Machine(None, "C", "em63", "10.0.0.5", vnc_view_password="sv", vnc_control_password="sc"))
+    r = client.put(f"/api/machines/{m.id}", json={"clear_vnc_control_password": True})
+    assert r.status_code == 200 and r.json()["has_control_password"] is False
+    assert r.json()["has_view_password"] is True
+    r = client.put(f"/api/machines/{m.id}", json={"host": "10.6.6.6"})
+    assert r.status_code == 200 and r.json()["has_view_password"] is False
+    assert store.get(m.id).vnc_view_password == ""
+    r = client.put(f"/api/machines/{m.id}", json={"vnc_view_password": "SEGREDO9", "clear_vnc_view_password": True})
+    assert r.status_code == 422 and "SEGREDO9" not in r.text
+
+
+def test_put_none_em_obrigatorio_e_422(api):
+    client, store, a, b = api
+    for campo in ("name", "client", "notes", "ams_net_id"):
+        assert client.put(f"/api/machines/{b}", json={campo: None}).status_code == 422
+
+
+def test_put_na_ativa_sem_mudar_conexao_nao_reativa(api):
+    client, store, a, b = api
+    mgr = main.app.state.manager
+    antes = mgr.collector
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        r = client.put(f"/api/machines/{a}", json={"name": "A renomeada", "notes": "x", "client": "Outro"})
+        assert r.status_code == 200
+        assert mgr.collector is antes
+        info = client.get("/api/info").json()
+        assert info["machine_name"] == "A renomeada" and info["client"] == "Outro"
+        r = client.put(f"/api/machines/{a}", json={"host": "127.0.0.9"})
+        assert mgr.collector is not antes
+        for _ in range(50):
+            msg = ws.receive_json()
+            if msg.get("type") == "machine_changed":
+                break
+        assert msg["machine_id"] == a
