@@ -1,12 +1,15 @@
 """Cadastro de máquinas em SQLite (substitui a edição do .env para escolher a injetora)."""
 from __future__ import annotations
 
+import logging
 import shutil
 import sqlite3
 import threading
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from urllib.parse import urlparse
+
+log = logging.getLogger(__name__)
 
 KINDS = ("chy", "em63", "ads", "demo")
 _PROFILE = {"chy": "chy", "em63": "em63", "ads": "ads", "demo": "chy"}
@@ -167,6 +170,8 @@ class MachineStore:
 
     def set_active(self, id: int) -> None:
         with self._lock, self._conn:
+            if not self._conn.execute("SELECT 1 FROM machines WHERE id=?", (id,)).fetchone():
+                raise KeyError(id)
             self._conn.execute(
                 "INSERT INTO kv(key, value) VALUES ('active_id', ?) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -175,32 +180,50 @@ class MachineStore:
 
 
 def seed_from_settings(store: MachineStore, settings, machines_dir: str) -> None:
-    """Cadastro vazio: cria a máquina descrita no .env (ou demo com SIMULATE=1) e migra o histórico."""
-    if store.list():
+    """Cadastro vazio: cria a máquina do .env (ou demo com SIMULATE=1) e migra o histórico.
+
+    Também repara um seed incompleto: sem máquina ativa válida, ativa a primeira.
+    """
+    created: Machine | None = None
+    if not store.list():
+        u = urlparse(settings.opcua_url)
+        host = u.hostname or ""
+        port = u.port or 4840
+        if settings.simulate:
+            kind = "demo"
+        else:
+            kind = settings.profile if settings.profile in ("chy", "em63", "ads") else "chy"
+        ns = settings.namespace if settings.namespace != 1 else None
+        notes = ""
+        vnc_host = (getattr(settings, "vnc_host", "") or "").strip()
+        if vnc_host and vnc_host != host:
+            notes = (f"VNC_HOST do .env antigo: {vnc_host} "
+                     "(diferente do IP OPC-UA; ajuste se necessário)")
+            log.warning("VNC_HOST %s difere do host OPC-UA %s; registrado em notes", vnc_host, host)
+        created = store.add(Machine(
+            None, settings.machine_name, kind, host,
+            opcua_port=port, namespace=ns, notes=notes,
+            vnc_enabled=getattr(settings, "vnc_enabled", None),
+            vnc_port=getattr(settings, "vnc_port", 5900),
+            vnc_view_password=getattr(settings, "vnc_view_password", ""),
+            vnc_control_password=getattr(settings, "vnc_control_password", ""),
+        ))
+    machines = store.list()
+    if not machines:
         return
-    u = urlparse(settings.opcua_url)
-    host = u.hostname or ""
-    port = u.port or 4840
-    if settings.simulate:
-        kind = "demo"
-    else:
-        kind = settings.profile if settings.profile in ("chy", "em63", "ads") else "chy"
-    ns = settings.namespace if settings.namespace != 1 else None
-    m = store.add(Machine(
-        None, settings.machine_name, kind, host,
-        opcua_port=port, namespace=ns,
-        vnc_enabled=getattr(settings, "vnc_enabled", None),
-        vnc_port=getattr(settings, "vnc_port", 5900),
-        vnc_view_password=getattr(settings, "vnc_view_password", ""),
-        vnc_control_password=getattr(settings, "vnc_control_password", ""),
-    ))
-    store.set_active(m.id)
-    mdir = Path(machines_dir)
-    mdir.mkdir(parents=True, exist_ok=True)
-    old_db = Path(settings.db_path)
-    for src, dst in (
-        (old_db, mdir / f"{m.id}.db"),
-        (old_db.with_name("tags_cache.json"), mdir / f"{m.id}_tags.json"),
-    ):
-        if src.exists() and not dst.exists():
-            shutil.copy2(src, dst)
+    active = store.active_id()
+    if active is None or store.get(active) is None:
+        store.set_active(machines[0].id)
+    if created is not None:
+        try:
+            mdir = Path(machines_dir)
+            mdir.mkdir(parents=True, exist_ok=True)
+            old_db = Path(settings.db_path)
+            for src, dst in (
+                (old_db, mdir / f"{created.id}.db"),
+                (old_db.with_name("tags_cache.json"), mdir / f"{created.id}_tags.json"),
+            ):
+                if src.exists() and not dst.exists():
+                    shutil.copy2(src, dst)
+        except Exception:  # cópia do histórico nunca bloqueia a inicialização
+            log.exception("falha ao migrar histórico da máquina %s", created.id)

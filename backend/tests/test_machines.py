@@ -79,5 +79,73 @@ def test_seed_do_env(tmp_path, store):
     assert len(ms) == 1
     assert ms[0].kind == "em63" and ms[0].host == "10.86.20.253"
     assert store.active_id() == ms[0].id
-    assert (tmp_path / "machines" / "1.db").exists()
-    assert (tmp_path / "machines" / "1_tags.json").exists()
+    assert (tmp_path / "machines" / "1.db").read_bytes() == b"x"
+    assert (tmp_path / "machines" / "1_tags.json").read_text() == "{}"
+
+
+def _settings(tmp_path, **kw):
+    base = dict(
+        opcua_url="opc.tcp://10.0.0.5:4840", profile="chy", machine_name="M",
+        vnc_view_password="", vnc_control_password="", vnc_host="", vnc_port=5900,
+        simulate=False, db_path=str(tmp_path / "monitor.db"), namespace=1,
+    )
+    base.update(kw)
+    return SimpleNamespace(**base)
+
+
+def test_delete_limpa_ativa(store):
+    a = store.add(Machine(None, "A", "chy", "1.1.1.1"))
+    store.set_active(a.id)
+    store.delete(a.id)
+    assert store.active_id() is None
+
+
+def test_set_active_desconhecida(store):
+    with pytest.raises(KeyError):
+        store.set_active(999)
+    assert store.active_id() is None
+
+
+def test_update_invalido(store):
+    with pytest.raises(KeyError):
+        store.update(999, {"name": "x"})
+    a = store.add(Machine(None, "A", "chy", "1.1.1.1"))
+    with pytest.raises(ValueError):
+        store.update(a.id, {"kind": "plc"})
+    with pytest.raises(ValueError):
+        store.update(a.id, {"opcua_port": 0})
+    assert store.get(a.id).kind == "chy"
+
+
+def test_seed_simulate_demo(tmp_path, store):
+    seed_from_settings(store, _settings(tmp_path, simulate=True), str(tmp_path / "m"))
+    assert store.list()[0].kind == "demo"
+
+
+def test_seed_namespace_customizado(tmp_path, store):
+    seed_from_settings(store, _settings(tmp_path, namespace=3), str(tmp_path / "m"))
+    assert store.list()[0].namespace == 3
+
+
+def test_seed_vnc_host_diferente_vai_para_notes(tmp_path, store):
+    seed_from_settings(store, _settings(tmp_path, vnc_host="10.9.9.9"), str(tmp_path / "m"))
+    assert "10.9.9.9" in store.list()[0].notes
+    s2 = MachineStore(str(tmp_path / "c2.db"))
+    seed_from_settings(s2, _settings(tmp_path, vnc_host="10.0.0.5"), str(tmp_path / "m"))
+    assert s2.list()[0].notes == ""
+    s2.close()
+
+
+def test_seed_repara_sem_ativa(tmp_path, store):
+    a = store.add(Machine(None, "A", "chy", "1.1.1.1"))
+    seed_from_settings(store, _settings(tmp_path), str(tmp_path / "m"))
+    assert len(store.list()) == 1
+    assert store.active_id() == a.id
+
+
+def test_seed_copia_falha_nao_bloqueia(tmp_path, store):
+    (tmp_path / "monitor.db").write_bytes(b"x")
+    (tmp_path / "blocker").write_text("arquivo")  # machines_dir dentro de um arquivo: mkdir falha
+    seed_from_settings(store, _settings(tmp_path), str(tmp_path / "blocker" / "sub"))
+    assert len(store.list()) == 1
+    assert store.active_id() is not None
