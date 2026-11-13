@@ -267,14 +267,6 @@ def test_falha_ao_parar_coletor_ainda_fecha_hub(tmp_path):
     asyncio.run(run())
 
 
-def test_ads_nao_monta_hub_vnc_ainda(tmp_path):
-    store, mgr, _ = _setup(tmp_path, [])
-    m = Machine(1, "Bk", "ads", "10.0.0.7", vnc_enabled=True, vnc_view_password="v")
-    assert mgr._new_hub(m) is None
-    assert mgr._new_hub(Machine(2, "BR", "em63", "10.0.0.8", vnc_view_password="v")) is not None
-    store.close()
-
-
 def test_probe_all_pula_demo_e_a_ativa(tmp_path):
     async def run():
         from app.sources import SimulatedSource
@@ -341,3 +333,184 @@ def test_refresh_atualiza_sem_reabrir(tmp_path):
             store.close()
 
     asyncio.run(run())
+
+
+# ---- tela da Beckhoff (ponte CERHost) -------------------------------------
+class FakeBridge:
+    """Ponte sem Wine/Xvfb: registra start/stop e expõe estado e porta como a real."""
+
+    def __init__(self, m, port=45901, state="connected", error=None, start_delay=0.0, stop_delay=0.0):
+        self.machine, self.port, self.final_state, self.final_error = m, port, state, error
+        self.state, self.error = "stopped", None
+        self.start_delay, self.stop_delay = start_delay, stop_delay
+        self.started = self.stopped = 0
+
+    async def start(self):
+        self.started += 1
+        self.state = "starting"
+        await asyncio.sleep(self.start_delay)
+        self.state, self.error = self.final_state, self.final_error
+
+    async def stop(self):
+        self.stopped += 1
+        await asyncio.sleep(self.stop_delay)
+        self.state, self.error = "stopped", None
+
+
+def _ads(name="Bk", **kw):
+    kw.setdefault("vnc_enabled", True)
+    kw.setdefault("vnc_view_password", "vista")
+    kw.setdefault("vnc_control_password", "op")
+    return Machine(None, name, "ads", "10.0.0.7", ams_net_id="5.79.97.240.1.1", **kw)
+
+
+def _bk_manager(tmp_path, machines, **bridge_kw):
+    from app.sources import SimulatedSource
+    bridges = []
+
+    def factory(m):
+        b = FakeBridge(m, **bridge_kw)
+        bridges.append(b)
+        return b
+
+    store, mgr, ids = _setup(tmp_path, machines, source_factory=lambda m: SimulatedSource(),
+                             bridge_factory=factory)
+    return store, mgr, ids, bridges
+
+
+def test_ads_com_tela_sobe_ponte_e_hub(tmp_path):
+    async def run():
+        store, mgr, (a,), bridges = _bk_manager(tmp_path, [_ads()])
+        try:
+            await mgr.activate(a)
+            await asyncio.sleep(0.05)
+            b = mgr.bridge
+            assert b is bridges[0] and b.started == 1 and b.state == "connected"
+            assert b.machine.id == a
+            assert mgr.hub is not None and mgr.hub.host == "127.0.0.1"
+            assert mgr.hub.current_port() == 45901
+            assert mgr.hub.view_password == "vista" and mgr.hub.control_password == "op"
+            assert mgr.hub.name == "Bk"
+            b.port = 45999  # x11vnc reiniciado em outra porta: o hub acompanha
+            assert mgr.hub.current_port() == 45999
+            b.port = None  # x11vnc desligado enquanto o robô reconecta
+            assert mgr.hub.current_port() is None
+        finally:
+            await mgr.stop()
+            store.close()
+        assert bridges[0].stopped == 1 and mgr.bridge is None
+
+    asyncio.run(run())
+
+
+def test_ponte_lenta_nao_trava_o_activate(tmp_path):
+    async def run():
+        store, mgr, (a,), bridges = _bk_manager(tmp_path, [_ads()], start_delay=30)
+        try:
+            t0 = asyncio.get_running_loop().time()
+            await mgr.activate(a)
+            assert asyncio.get_running_loop().time() - t0 < 1
+            await asyncio.sleep(0)
+            assert mgr.bridge.state == "starting" and mgr.hub is not None
+            assert mgr.collector is not None
+        finally:
+            await mgr.stop()  # cancela a subida em andamento
+            store.close()
+        assert bridges[0].stopped == 1
+
+    asyncio.run(run())
+
+
+def test_troca_para_br_para_ponte(tmp_path):
+    async def run():
+        ms = [_ads(), Machine(None, "BR", "em63", "127.0.0.1", vnc_port=59999, vnc_view_password="v")]
+        store, mgr, (a, b), bridges = _bk_manager(tmp_path, ms)
+        try:
+            await mgr.activate(a)
+            old_hub = mgr.hub
+            await mgr.activate(b)
+            assert bridges[0].stopped == 1 and old_hub._closed
+            assert mgr.bridge is None
+            assert mgr.hub is not None and mgr.hub.host == "127.0.0.1" and mgr.hub.port == 59999
+            assert len(bridges) == 1
+        finally:
+            await mgr.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_parada_lenta_da_ponte_tem_limite(tmp_path):
+    async def run():
+        store, mgr, (a, b), bridges = _bk_manager(tmp_path, [_ads(), _demo("D")], stop_delay=30)
+        mgr.close_timeout = 0.2
+        try:
+            await mgr.activate(a)
+            t0 = asyncio.get_running_loop().time()
+            await mgr.activate(b)
+            assert asyncio.get_running_loop().time() - t0 < 1.5
+            assert mgr.machine.id == b and mgr.bridge is None
+        finally:
+            await mgr.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_ads_sem_tela_nao_sobe_ponte(tmp_path):
+    async def run():
+        ms = [Machine(None, "Bk", "ads", "10.0.0.7"),  # padrão: tela da Beckhoff desligada
+              _ads("SemSenha", vnc_view_password=""),
+              _ads("Desligada", vnc_enabled=False)]
+        store, mgr, ids, bridges = _bk_manager(tmp_path, ms)
+        try:
+            assert ms[0].effective_vnc_enabled is False
+            for i in ids:
+                await mgr.activate(i)
+                assert mgr.bridge is None and mgr.hub is None and mgr.collector is not None
+            assert bridges == []
+        finally:
+            await mgr.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_ads_porta_5901_so_assume_na_subida(tmp_path):
+    async def run():
+        store, mgr, (a, b), bridges = _bk_manager(tmp_path, [_ads("A"), _ads("B")])
+        store.set_active(a)
+        mgr.settings.vnc_tcp_port = _free_port()
+        try:
+            await mgr.start()
+            assert mgr.hub.tcp_auto_take is True and mgr.bridge is bridges[0]
+            await mgr.activate(b)
+            assert mgr.hub.tcp_auto_take is False
+            assert bridges[0].stopped == 1 and mgr.bridge is bridges[1]
+        finally:
+            await mgr.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_fabrica_padrao_da_ponte(tmp_path):
+    from app.cerhost import CerhostBridge
+    store, mgr, _ = _setup(tmp_path, [])
+    mgr.settings.cerhost_exe = "/opt/cerhost/CERHOST.exe"
+    mgr.settings.cerhost_display = 77
+    mgr.settings.cerhost_wineprefix = "/srv/wine-cerhost"
+    b = mgr.build_bridge(_ads())
+    assert isinstance(b, CerhostBridge)
+    assert (b.host, b.display, b.cerhost_exe, b.view_password, b.control_password, b.wineprefix) == \
+        ("10.0.0.7", 77, "/opt/cerhost/CERHOST.exe", "vista", "op", "/srv/wine-cerhost")
+    store.close()
+
+
+def test_hub_da_br_nao_mudou(tmp_path):
+    store, mgr, _ = _setup(tmp_path, [])
+    hub = mgr._new_hub(Machine(2, "BR", "em63", "10.0.0.8", vnc_view_password="v"), None)
+    assert hub is not None and hub.host == "10.0.0.8" and hub.current_port() == 5900
+    assert mgr._new_hub(Machine(3, "D", "demo", "10.0.0.9", vnc_enabled=True, vnc_view_password="v"),
+                        None) is None
+    store.close()

@@ -1,4 +1,5 @@
-"""Dono da máquina ativa: troca coletor e hub VNC em tempo de execução e sonda o status de todas."""
+"""Dono da máquina ativa: troca coletor, hub VNC e ponte CERHost em tempo de execução e sonda o
+status de todas."""
 from __future__ import annotations
 
 import asyncio
@@ -7,6 +8,7 @@ import logging
 import time
 from pathlib import Path
 
+from .cerhost import CerhostBridge
 from .collector import Collector
 from .em63 import Em63Source
 from .machines import Machine, MachineStore
@@ -20,16 +22,20 @@ PROBE_INTERVAL = 30.0
 PROBE_TIMEOUT = 3.0
 CLOSE_TIMEOUT = 5.0  # maior que o limite do disconnect() das fontes OPC-UA (4 s)
 SWITCH_REASON = "máquina trocada"
+BRIDGE_HOST = "127.0.0.1"  # o x11vnc da ponte só escuta aqui
 
 
 class MachineManager:
-    def __init__(self, store: MachineStore, settings, source_factory=None):
+    def __init__(self, store: MachineStore, settings, source_factory=None, bridge_factory=None):
         self.store = store
         self.settings = settings
         self.source_factory = source_factory  # testes: fábrica(machine) -> fonte
+        self.bridge_factory = bridge_factory  # testes: fábrica(machine) -> ponte (sem Wine/Xvfb)
         self.machine: Machine | None = None
         self.collector: Collector | None = None
         self.hub: VncHub | None = None
+        self.bridge: CerhostBridge | None = None  # tela da Beckhoff (só com ads e tela ligada)
+        self._bridge_task: asyncio.Task | None = None
         self.close_timeout = CLOSE_TIMEOUT  # limite do desligamento da máquina anterior
         self._lock = asyncio.Lock()
         self._probes: dict[int, tuple[float | None, float]] = {}  # id -> (latência ms, ts)
@@ -80,19 +86,52 @@ class MachineManager:
             storage.close()
             raise
 
-    def _new_hub(self, m: Machine) -> VncHub | None:
-        """Tela ao vivo: só com VNC ligado, fora do modo demo e com a senha de visualização.
-
-        Beckhoff (ads) fica sem tela até a Fase 2.
-        """
-        if m.kind in ("demo", "ads") or not m.effective_vnc_enabled:
-            return None
+    def _wants_screen(self, m: Machine) -> bool:
+        """Tela ao vivo: só com VNC ligado, fora do modo demo e com a senha de visualização."""
+        if m.kind == "demo" or not m.effective_vnc_enabled:
+            return False
         if not m.vnc_view_password:
             log.warning("Tela ao vivo desligada para %s: sem senha de visualização", m.name)
-            return None
+            return False
+        return True
+
+    def build_bridge(self, m: Machine):
+        """Ponte CERHost da Beckhoff (CERHOST.exe no Wine, servido por x11vnc em 127.0.0.1)."""
+        if self.bridge_factory is not None:
+            return self.bridge_factory(m)
         s = self.settings
-        return VncHub(m.host, m.vnc_port, m.vnc_view_password, m.vnc_control_password,
-                      control_timeout=s.vnc_control_timeout, name=m.name, audit_path=s.vnc_audit_path)
+        return CerhostBridge(m.host, getattr(s, "cerhost_display", 99), getattr(s, "cerhost_exe", ""),
+                             m.vnc_view_password, m.vnc_control_password,
+                             wineprefix=getattr(s, "cerhost_wineprefix", ""))
+
+    def _new_hub(self, m: Machine, bridge) -> VncHub | None:
+        """Hub da tela ao vivo. Beckhoff (ads): o painel é o x11vnc da ponte, em 127.0.0.1.
+
+        A porta da ponte só existe depois que o CERHost conecta e pode mudar (o x11vnc é desligado
+        enquanto o robô reconecta): o hub pergunta a porta à ponte a cada tentativa e, enquanto não
+        houver, tenta de novo a cada 3 s, como faz com um painel VNC fora do ar.
+        """
+        s = self.settings
+        common = dict(control_timeout=s.vnc_control_timeout, name=m.name, audit_path=s.vnc_audit_path)
+        if m.kind == "ads":
+            if bridge is None:
+                return None
+            return VncHub(BRIDGE_HOST, bridge.port or 0, m.vnc_view_password, m.vnc_control_password,
+                          port_provider=lambda: bridge.port, **common)
+        if not self._wants_screen(m):
+            return None
+        return VncHub(m.host, m.vnc_port, m.vnc_view_password, m.vnc_control_password, **common)
+
+    def _start_bridge(self, bridge) -> asyncio.Task:
+        """A subida da ponte pode levar dezenas de segundos: roda em segundo plano."""
+        async def run():
+            try:
+                await bridge.start()
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                log.exception("falha ao subir a tela da Beckhoff")
+        return asyncio.create_task(run(), name="ponte-cerhost")
 
     async def _bounded(self, what: str, coro) -> None:
         """Desligamento com limite de tempo: máquina "meio aberta" não trava a troca."""
@@ -105,7 +144,8 @@ class MachineManager:
 
     async def _close_current(self) -> None:
         old_c, old_h = self.collector, self.hub
-        self.machine = self.collector = self.hub = None
+        old_b, old_bt = self.bridge, self._bridge_task
+        self.machine = self.collector = self.hub = self.bridge = self._bridge_task = None
         try:
             if old_c is not None:
                 await self._bounded("coletor", old_c.stop())
@@ -114,8 +154,26 @@ class MachineManager:
                 if old_c is not None:
                     old_c.storage.close()
             finally:
-                if old_h is not None:
-                    await self._bounded("hub VNC", old_h.close(SWITCH_REASON))
+                try:
+                    if old_h is not None:
+                        await self._bounded("hub VNC", old_h.close(SWITCH_REASON))
+                finally:
+                    await self._close_bridge(old_b, old_bt)
+
+    async def _close_bridge(self, bridge, task: asyncio.Task | None) -> None:
+        """Encerra a ponte (CERHost, x11vnc, Openbox, Xvfb), mesmo no meio da subida.
+
+        Primeiro cancela a tarefa de subida (se ela nem começou, não começa mais: nada sobe depois
+        do stop); depois o stop da ponte, que cancela o vigia e derruba os processos.
+        """
+        try:
+            if task is not None and not task.done():
+                task.cancel()
+                with contextlib.suppress(asyncio.CancelledError, Exception):
+                    await asyncio.wait_for(task, self.close_timeout)
+        finally:
+            if bridge is not None:
+                await self._bounded("tela da Beckhoff", bridge.stop())
 
     async def activate(self, machine_id: int, at_startup: bool = False) -> Machine:
         """Abre a máquina (fechando a anterior).
@@ -133,9 +191,11 @@ class MachineManager:
                 old_c.notify({"type": "machine_changed", "machine_id": machine_id})
             await self._close_current()
             collector = self._new_collector(m)
-            hub = None
+            hub = bridge = bridge_task = None
             try:
-                hub = self._new_hub(m)
+                if m.kind == "ads" and self._wants_screen(m):
+                    bridge = self.build_bridge(m)
+                hub = self._new_hub(m, bridge)
                 collector.start()  # não espera a conexão: o coletor continua tentando
                 if hub is not None and self.settings.vnc_tcp_port:
                     try:
@@ -144,13 +204,17 @@ class MachineManager:
                     except OSError as exc:
                         log.warning("porta VNC %s indisponível (%s)", self.settings.vnc_tcp_port, exc)
                 self.store.set_active(machine_id)
+                if bridge is not None:
+                    bridge_task = self._start_bridge(bridge)  # não espera: o hub reconecta sozinho
             except BaseException:
                 await collector.stop()
                 collector.storage.close()
                 if hub is not None:
                     await hub.close()
+                await self._close_bridge(bridge, bridge_task)
                 raise
             self.machine, self.collector, self.hub = m, collector, hub
+            self.bridge, self._bridge_task = bridge, bridge_task
             log.info("máquina ativa: %s (id %s)", m.name, m.id)
             return m
 

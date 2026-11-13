@@ -209,3 +209,68 @@ def test_beckhoff_mostra_8_zonas_sem_bico(tmp_path):
         del main.app.state.manager
     assert [z["label"] for z in zones] == [f"Zona {i}" for i in range(1, 9)]
     assert zones[7]["setpoint"] == "TempZ8"
+
+
+class _MissingBridge:
+    """Ponte de teste: o servidor não tem as ferramentas da tela da Beckhoff."""
+
+    def __init__(self, m):
+        self.state, self.error, self.port = "stopped", None, None
+
+    async def start(self):
+        self.state = "missing"
+        self.error = "Para a tela da Beckhoff falta no servidor: x11vnc, CERHOST.exe."
+
+    async def stop(self):
+        pass
+
+
+def _bk_api(tmp_path, bridge_factory, **machine):
+    from app.sources import SimulatedSource
+    store = MachineStore(str(tmp_path / "m.db"))
+    m = store.add(Machine(None, "Beckhoff", "ads", "10.0.0.7", ams_net_id="5.79.97.240.1.1",
+                          **machine)).id
+    store.set_active(m)
+    main.app.state.manager = MachineManager(store, _settings(tmp_path),
+                                            source_factory=lambda _m: SimulatedSource(),
+                                            bridge_factory=bridge_factory)
+    return store
+
+
+def test_status_mostra_falta_de_ferramenta(tmp_path):
+    _bk_api(tmp_path, _MissingBridge, vnc_enabled=True, vnc_view_password="SEGREDO1",
+            vnc_control_password="SEGREDO2")
+    try:
+        with TestClient(main.app) as client:
+            info = client.get("/api/info").json()
+            assert info["vnc"] is True and info["vnc_control"] is True
+            r = client.get("/api/vnc/status")
+            assert r.status_code == 200
+            st = r.json()
+            assert st["bridge"]["state"] == "missing"
+            assert "x11vnc" in st["bridge"]["error"] and "CERHOST.exe" in st["bridge"]["error"]
+            assert "SEGREDO" not in r.text
+            with client.websocket_connect("/ws/vnc") as ws:
+                with pytest.raises(WebSocketDisconnect) as exc:
+                    ws.receive_bytes()
+            assert exc.value.code == 1008 and "falta no servidor" in exc.value.reason
+    finally:
+        del main.app.state.manager
+
+
+def test_ads_sem_tela_nao_tem_vnc(tmp_path):
+    _bk_api(tmp_path, _MissingBridge)
+    try:
+        with TestClient(main.app) as client:
+            assert client.get("/api/info").json()["vnc"] is False
+            assert client.get("/api/vnc/status").status_code == 404
+    finally:
+        del main.app.state.manager
+
+
+def test_status_da_br_sem_ponte(api):
+    client, store, a, b = api
+    m = store.add(Machine(None, "BR", "em63", "127.0.0.1", vnc_port=59999, vnc_view_password="v"))
+    client.post(f"/api/machines/{m.id}/activate")
+    st = client.get("/api/vnc/status").json()
+    assert "bridge" not in st and "panel" in st

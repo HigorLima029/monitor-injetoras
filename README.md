@@ -103,6 +103,46 @@ não direto no painel: se outro cliente se conectar direto, o painel derruba um 
 Os dados de produção (OPC-UA) continuam **só leitura**: o controle remoto vale só
 para a tela, e só com a senha de operação.
 
+## Tela da Beckhoff
+
+O painel Windows CE da Beckhoff só fala o protocolo fechado do CERHost (porta 987). O próprio
+servidor do Monitor roda o `CERHOST.exe` no Wine, numa tela virtual, e a serve por VNC só em
+`127.0.0.1`; o hub VNC consome essa tela como a de um painel B&R, com as mesmas regras (senha de
+visualização, senha de operação, um operador por vez, registro, e a porta 5901 só visualização
+depois de uma troca de máquina):
+
+```
+Beckhoff :987 ── CERHOST.exe (Wine 32) em Xvfb + Openbox ── x11vnc (127.0.0.1) ── hub VNC ── navegador
+```
+
+No servidor (Debian/Ubuntu):
+
+```bash
+sudo dpkg --add-architecture i386 && sudo apt-get update   # Wine 32 bits
+sudo apt-get install -y xvfb openbox xdotool wmctrl x11vnc wine32:i386
+```
+
+No `.env`:
+
+- `CERHOST_EXE=` caminho do `CERHOST.exe` (sem padrão; vazio = tela da Beckhoff desligada, com aviso).
+- `CERHOST_DISPLAY=99` número da tela virtual (Xvfb `:99`).
+- `CERHOST_WINEPREFIX=` prefixo Wine dedicado ao CERHost (opcional). Com ele, ao encerrar a
+  ponte roda `wineserver -k` só nesse prefixo; vazio = usa o prefixo herdado e nunca roda
+  `wineserver -k`.
+
+No cadastro da máquina `ads` (página **Máquinas**), **ligue a Tela ao vivo** (vem desligada na
+Beckhoff) e defina as duas senhas VNC: a de visualização (obrigatória) e a de operação (vazia =
+ninguém opera). Elas valem só entre o Monitor e o x11vnc local, até 8 caracteres. A porta VNC do
+cadastro não é usada na Beckhoff: o servidor escolhe a porta local.
+
+A ponte só existe enquanto a Beckhoff é a máquina aberta; ao trocar, tudo é encerrado. Ela sobe
+em segundo plano (os dados ADS aparecem na hora; a tela, quando o CERHost conectar) e reconecta
+sozinha se o CERHost cair. O robô de teclado (xdotool) só digita o IP no diálogo de conexão,
+**antes** de conectar, com o VNC desligado; depois disso nada é enviado à tela além do que o
+operador fizer. Faltando alguma ferramenta ou o `CERHOST.exe`, o Monitor sobe normal, os dados
+ADS seguem e a Tela ao vivo diz o que falta (`GET /api/vnc/status` traz `bridge.state` e
+`bridge.error`). Operar só em contingência, com alguém no local.
+
 ## Máquinas
 
 As máquinas são cadastradas na página **Máquinas** do Monitor (nome, tipo `chy`,
@@ -200,6 +240,9 @@ cd backend && .venv/bin/python -m pytest -q
 | `MACHINES_DIR` | `data/machines` | Histórico e cache de tags de cada máquina |
 | `ADS_LOCAL_NET_ID` | vazio | AMS Net ID deste servidor (máquinas `ads`) |
 | `VNC_AUDIT_PATH` | `data/vnc_audit.log` | Registro de quem entrou e operou |
+| `CERHOST_EXE` | vazio | Caminho do `CERHOST.exe` (tela da Beckhoff; vazio = desligada) |
+| `CERHOST_DISPLAY` | `99` | Tela virtual (Xvfb) da ponte CERHost |
+| `CERHOST_WINEPREFIX` | vazio | Prefixo Wine dedicado ao CERHost (opcional) |
 
 ## API
 
@@ -213,7 +256,7 @@ cd backend && .venv/bin/python -m pytest -q
 | `GET /api/production?hours=8` | Peças e refugo por intervalo, ciclo médio |
 | `GET /api/alarms?hours=24` | Alarmes ativos e eventos |
 | `GET /api/values?tags=A,B` | Valores atuais de tags específicas (usado pelo Painel da máquina) |
-| `GET /api/vnc/status?sid=…` | Papel da sessão, quem está operando, tempo restante |
+| `GET /api/vnc/status?sid=…` | Papel da sessão, quem está operando, tempo restante; na Beckhoff, `bridge: {state, error}` |
 | `POST /api/vnc/control` | `{"sid", "action": "take" \| "release"}`: assumir ou liberar o controle |
 | `GET /api/tags?q=temp` | Todas as variáveis com valor atual |
 | `WS /ws` | Valores ao vivo a cada leitura |
