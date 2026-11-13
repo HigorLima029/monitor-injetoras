@@ -1,0 +1,12 @@
+declare module '@novnc/novnc/lib/rfb' {
+  export default class RFB extends EventTarget {
+    constructor(target: HTMLElement, urlOrChannel: string | WebSocket, options?: { shared?: boolean; wsProtocols?: string[]; credentials?: { password?: string } })
+    viewOnly: boolean
+    scaleViewport: boolean
+    resizeSession: boolean
+    background: string
+    disconnect(): void
+    focus(): void
+    sendCredentials(credentials: { username?: string; password?: string; target?: string }): void
+  }
+}

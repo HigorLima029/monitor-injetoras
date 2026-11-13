@@ -23,12 +23,15 @@ def to_number(value: Any) -> float | None:
 
 class Collector:
     def __init__(self, source: Source, storage: Storage, poll_seconds: float = 5,
-                 full_poll_seconds: float = 60, retention_days: int = 7):
+                 full_poll_seconds: float = 60, retention_days: int = 7, read_timeout: float = 20):
         self.source = source
         self.storage = storage
         self.poll_seconds = poll_seconds
         self.full_poll_seconds = full_poll_seconds
         self.retention_days = retention_days
+        # Limite de cada conexão/leitura: em Wi-Fi/4G a conexão pode cair "em silêncio" e a
+        # leitura ficaria esperando para sempre, com o painel mostrando dados velhos.
+        self.read_timeout = read_timeout
 
         self.connected = False
         self.last_ok: float | None = None
@@ -41,6 +44,7 @@ class Collector:
         self._last_full = 0.0
         self._last_prune = 0.0
         self._subscribers: set[asyncio.Queue] = set()
+        self._watched: dict[str, float] = {}
         self._task: asyncio.Task | None = None
 
     # ---- ciclo de vida --------------------------------------------------
@@ -72,13 +76,26 @@ class Collector:
     @property
     def fast_tags(self) -> list[str]:
         known = set(self.tags)
-        return [t for t in HISTORY_TAGS if t in known] + self.alarm_tags
+        now = time.time()
+        self._watched = {t: exp for t, exp in self._watched.items() if exp > now}
+        base = [t for t in HISTORY_TAGS if t in known] + self.alarm_tags
+        extra = [t for t in self._watched if t in known and t not in base]
+        return base + extra
+
+    def watch(self, tags: list[str], seconds: float = 30) -> None:
+        """Inclui tags na leitura rápida enquanto alguém está olhando a tela que as usa."""
+        until = time.time() + seconds
+        for t in tags:
+            self._watched[t] = until
+
+    def current(self, tags: list[str]) -> dict[str, Any]:
+        return {t: self.values.get(t) for t in tags}
 
     async def _run(self) -> None:
         while True:
             try:
-                await self.source.connect()
-                self.tags = await self.source.list_tags()
+                await asyncio.wait_for(self.source.connect(), self.read_timeout * 2)
+                self.tags = await asyncio.wait_for(self.source.list_tags(), self.read_timeout * 3)
                 self.connected = True
                 self.last_error = None
                 log.info("conectado: %d variáveis", len(self.tags))
@@ -89,7 +106,10 @@ class Collector:
                 raise
             except Exception as exc:  # rede instável: registra e tenta de novo
                 self.connected = False
-                self.last_error = f"{type(exc).__name__}: {exc}"[:300]
+                if isinstance(exc, asyncio.TimeoutError):
+                    self.last_error = f"o painel não respondeu em {self.read_timeout:.0f} s (rede lenta ou caiu)"
+                else:
+                    self.last_error = f"{type(exc).__name__}: {exc}"[:300]
                 log.warning("conexão caiu: %s", self.last_error)
                 await self.source.close()
                 self._broadcast()
@@ -99,7 +119,7 @@ class Collector:
         now = time.time()
         full = now - self._last_full >= self.full_poll_seconds
         tags = self.tags if full else self.fast_tags
-        values = await self.source.read(tags)
+        values = await asyncio.wait_for(self.source.read(tags), self.read_timeout)
         if full:
             self._last_full = now
         self._apply(now, values)
@@ -133,8 +153,14 @@ class Collector:
         self._broadcast()
 
     # ---- estado derivado ------------------------------------------------
+    @property
+    def stale(self) -> bool:
+        """Conectado, mas sem leitura nova há tempo demais (a leitura travou)."""
+        limit = max(30.0, 4 * self.poll_seconds, self.read_timeout + self.poll_seconds + 5)
+        return self.last_ok is not None and time.time() - self.last_ok > limit
+
     def machine_state(self) -> str:
-        if not self.connected:
+        if not self.connected or self.stale:
             return "offline"
         if self.active_alarms:
             return "alarme"
@@ -146,7 +172,7 @@ class Collector:
 
     def status(self) -> dict:
         return {
-            "connected": self.connected,
+            "connected": self.connected and not self.stale,
             "state": self.machine_state(),
             "last_ok": self.last_ok,
             "last_error": self.last_error,
@@ -164,7 +190,10 @@ class Collector:
         }
 
     def _broadcast(self) -> None:
-        payload = self.live()
+        self.notify(self.live())
+
+    def notify(self, payload: dict) -> None:
+        """Coloca `payload` na fila de cada assinante (descarta o mais antigo se estiver cheia)."""
         for q in list(self._subscribers):
             if q.full():
                 try:

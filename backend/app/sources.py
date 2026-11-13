@@ -5,6 +5,8 @@ OPC-UA e não deve existir (o teste test_codigo_nao_escreve_na_maquina garante).
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import math
 import random
@@ -15,6 +17,24 @@ from typing import Protocol
 from asyncua import Client, ua
 
 from .tags import ALARM_PREFIX, BARREL_ZONES
+
+RECIPE_FILE = Path(__file__).with_name("demo_recipe.json")
+# Limite do disconnect() educado; o gerenciador espera um pouco mais (CLOSE_TIMEOUT = 5 s).
+DISCONNECT_TIMEOUT = 4.0
+
+
+async def close_client(client: Client) -> None:
+    """Desconecta com limite de tempo e SEMPRE fecha o socket, mesmo se cancelado no meio.
+
+    Em 4G o disconnect() pode travar; sem o disconnect_socket() o socket ficaria aberto.
+    """
+    try:
+        await asyncio.wait_for(client.disconnect(), DISCONNECT_TIMEOUT)
+    except Exception:
+        pass
+    finally:
+        with contextlib.suppress(Exception):
+            client.disconnect_socket()
 
 
 class Source(Protocol):
@@ -45,12 +65,9 @@ class OpcUaSource:
         self._nodes = {}
 
     async def close(self) -> None:
-        if self._client is not None:
-            try:
-                await self._client.disconnect()
-            except Exception:
-                pass
-        self._client = None
+        client, self._client = self._client, None
+        if client is not None:
+            await close_client(client)
 
     async def list_tags(self) -> list[str]:
         if self._tags:
@@ -112,8 +129,11 @@ class SimulatedSource:
         self.power = 3810.0
         self.alarm_until = 0.0
         self.alarm_tag = ""
-        self.setpoints = {"TempNozzle": 230.0, "TempZ1": 270.0, "TempZ2": 260.0,
-                          "TempZ3": 250.0, "TempZ4": 200.0, "TempZ5": 200.0, "TempOil": 45.0}
+        # Receita real lida do gateway na bancada (parâmetros de molde, injeção, etc.).
+        self.recipe: dict[str, object] = json.loads(RECIPE_FILE.read_text(encoding="utf-8"))
+        self.setpoints = {t: float(self.recipe.get(t) or 0) for t in
+                          ("TempNozzle", "TempZ1", "TempZ2", "TempZ3", "TempZ4", "TempZ5")}
+        self.setpoints["TempOil"] = 45.0
         self._tags: list[str] = []
 
     async def connect(self) -> None:
@@ -124,11 +144,11 @@ class SimulatedSource:
 
     async def list_tags(self) -> list[str]:
         if not self._tags:
-            from .tags import ALARM_LABELS, HISTORY_TAGS
+            from .tags import ALARM_LABELS, EXTRA_SETPOINT_TAGS, HISTORY_TAGS
 
-            extra = ["Inject1Pres", "Inject1Speed", "Plast1Pos", "Open4Pos", "Clamp1Pres",
-                     "MaxTempOil", "WiFiSsid"]
-            self._tags = sorted(set(HISTORY_TAGS) | set(ALARM_LABELS) | set(extra))
+            # o simulador imita a CHY (5 zonas + bico): sem as zonas extras da Beckhoff
+            base = set(HISTORY_TAGS) - set(EXTRA_SETPOINT_TAGS)
+            self._tags = sorted(base | set(ALARM_LABELS) | set(self.recipe))
         return self._tags
 
     def _temp(self, sp: float, phase: float) -> float:
@@ -152,13 +172,14 @@ class SimulatedSource:
             )
             self.alarm_until = now + self.rng.uniform(40, 120)
 
-        vals: dict[str, object] = {}
-        for i, (_, now_tag, sp_tag, min_tag, max_tag) in enumerate(BARREL_ZONES):
+        vals: dict[str, object] = dict(self.recipe)
+        for i, (_, now_tag, sp_tag, _min, _max) in enumerate(BARREL_ZONES):
             sp = self.setpoints[sp_tag]
             vals[sp_tag] = sp
             vals[now_tag] = self._temp(sp, i)
-            vals[min_tag] = 10.0
-            vals[max_tag] = 10.0
+        vals["DutyNozzle"] = round(18 + self.rng.uniform(-4, 4), 1)
+        for z in range(1, 6):
+            vals[f"DutyZ{z}"] = round(35 + self.rng.uniform(-8, 8), 1)
         vals.update({
             "TempOil": self.setpoints["TempOil"], "MaxTempOil": 60.0,
             "TempOilNow": self._temp(self.setpoints["TempOil"], 9),
@@ -178,8 +199,10 @@ class SimulatedSource:
             "InjectEndLastPos": round(6.2 + self.rng.uniform(-0.3, 0.3), 2),
             "PlastEndLastPos": round(180 + self.rng.uniform(-0.5, 0.5), 1),
             "InjectMaxSpeed": 100.0, "PowerConsume": round(self.power, 2),
-            "Inject1Pres": 110.0, "Inject1Speed": 100.0, "Plast1Pos": 180.0, "Open4Pos": 360.0,
-            "Clamp1Pres": 40.0, "WiFiSsid": "simulador",
+            "EjectBackTime": 0.7, "DecompTime": round(0.4 + self.rng.uniform(-0.03, 0.03), 2),
+            "NozzAdvanceLastTime": 0.0, "NozzBackLastTime": 0.0,
+            "OpenMaxLastPos": round(360 + self.rng.uniform(-0.4, 0.4), 1),
+            "MaxProduction": 2000.0, "WiFiSsid": "simulador",
         })
         for tag in tags:
             if tag.startswith(ALARM_PREFIX):

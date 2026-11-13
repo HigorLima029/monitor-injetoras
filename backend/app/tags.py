@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import re
 
+from .ads_source import ADS_ALARMS
+
 # (tag, rótulo, unidade, grupo)
 KPI_TAGS: list[tuple[str, str, str, str]] = [
     ("DeviceOnOff", "Máquina ligada", "", "estado"),
@@ -52,8 +54,15 @@ BARREL_ZONES: list[tuple[str, str, str, str, str]] = [
 
 SETPOINT_TAGS = sorted({t for z in BARREL_ZONES for t in z[2:]} | {"TempOil", "MaxTempOil"})
 
+# Beckhoff (XMold): 8 zonas, sem bico separado. Mesmo formato de BARREL_ZONES.
+ADS_ZONES: list[tuple[str, str, str, str, str]] = [
+    (f"Zona {z}", f"TempZ{z}Now", f"TempZ{z}", f"MinTempZ{z}", f"MaxTempZ{z}") for z in range(1, 9)
+]
+# Setpoints que só existem nas máquinas com mais de 5 zonas.
+EXTRA_SETPOINT_TAGS = ["TempZ6", "TempZ7", "TempZ8"]
+
 # Tags gravadas no histórico (SQLite) a cada leitura.
-HISTORY_TAGS = [t[0] for t in KPI_TAGS] + SETPOINT_TAGS
+HISTORY_TAGS = [t[0] for t in KPI_TAGS] + SETPOINT_TAGS + EXTRA_SETPOINT_TAGS
 
 ALARM_PREFIX = "Warn"
 
@@ -126,6 +135,7 @@ ALARM_LABELS: dict[str, str] = {
     "WarnBackPressureTooHigh": "Contrapressão alta",
     "WarnAccChargeAlarm": "Alarme de carga do acumulador",
     "WarnHydraulicClampError": "Erro no fechamento hidráulico",
+    "WarnMachineError": "Máquina em erro (estado Euromap 63)",
 }
 
 
@@ -136,6 +146,12 @@ def humanize(tag: str) -> str:
 
 
 def alarm_label(tag: str) -> str:
+    if tag.startswith("WarnAds"):  # painéis Beckhoff: WarnAds<ID>
+        try:
+            alarm_id = int(tag[len("WarnAds"):])
+        except ValueError:
+            return humanize(tag)
+        return ADS_ALARMS.get(alarm_id, f"Alarme Beckhoff {alarm_id}")
     return ALARM_LABELS.get(tag, humanize(tag))
 
 
