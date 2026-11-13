@@ -70,6 +70,10 @@ class Settings:
     # AMS Net ID local do servidor (rota ADS); vazio = nao configurado
     ads_local_net_id: str = os.getenv("ADS_LOCAL_NET_ID", "")
     frontend_dist: str = _path(os.getenv("FRONTEND_DIST", "frontend/dist"))
+    # Tela ao vivo da Beckhoff: CERHOST.exe rodando no Wine numa tela virtual (Xvfb :N).
+    # Vazio = tela da Beckhoff desligada (com aviso); os dados ADS seguem normais.
+    cerhost_exe: str = _path(os.getenv("CERHOST_EXE", "")) if os.getenv("CERHOST_EXE", "").strip() else ""
+    cerhost_display: int = int(os.getenv("CERHOST_DISPLAY", "99"))
 
 
 settings = Settings()
