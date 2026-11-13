@@ -148,3 +148,33 @@ def test_connect_duas_vezes_fecha_a_anterior():
         await src.connect()
         assert plcs[0].closed == 1 and plcs[1].closed == 0
     asyncio.run(run())
+
+
+def test_alarme_desconhecido_chega_ao_coletor(tmp_path):
+    from app.collector import Collector
+    from app.storage import Storage
+
+    async def run():
+        plc = FakePlc()
+        src = _src(plc)
+        storage = Storage(str(tmp_path / "h.db"))
+        c = Collector(src, storage, poll_seconds=0.05, full_poll_seconds=0)
+        try:
+            await src.connect()
+            c.tags = await src.list_tags()  # antes da 1ª leitura: 999 ainda não é conhecido
+            assert "WarnAds999" not in c.tags
+            await c.poll_once()
+            assert "WarnAds999" in c.active_alarms and "WarnAds318" in c.active_alarms
+            assert alarm_label("WarnAds999") == "Alarme Beckhoff 999"
+            # o 999 some do painel: o coletor fecha o alarme mesmo sem ele estar em c.tags
+            msg = bytearray(plc.blocos[".STHMIMESSAGE"])
+            msg[96 + 56: 96 + 64] = bytes(8)
+            plc.blocos[".STHMIMESSAGE"] = bytes(msg)
+            c.full_poll_seconds = 3600
+            await c.poll_once()
+            assert "WarnAds999" not in c.active_alarms and "WarnAds318" in c.active_alarms
+            assert any(e["tag"] == "WarnAds999" and e["ended"] for e in storage.alarm_events(0))
+        finally:
+            await src.close()
+            storage.close()
+    asyncio.run(run())

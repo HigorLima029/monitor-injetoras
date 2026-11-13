@@ -126,6 +126,7 @@ class AdsSource:
         if plc is None:
             raise RuntimeError("AdsSource nao conectado")
         out: dict[str, object] = {}
+        extra: dict[str, object] = {}
         tentativas = 0
         erros: list[Exception] = []
 
@@ -163,6 +164,10 @@ class AdsSource:
                         continue
                     active.add(struct.unpack_from("<i", raw, base)[0])
                 self._seen_alarms |= active
+                # Todos os IDs conhecidos ou já vistos, pedidos ou não: um ID novo no painel
+                # (fora da lista de tags lida na conexão) também chega ao coletor e vira alarme.
+                for alarm_id in set(ADS_ALARMS) | self._seen_alarms:
+                    extra[f"{ALARM_PREFIX_ADS}{alarm_id}"] = 1.0 if alarm_id in active else 0.0
                 for tag in tags:
                     if tag.startswith(ALARM_PREFIX_ADS):
                         try:
@@ -177,7 +182,7 @@ class AdsSource:
         if tentativas and len(erros) == tentativas:
             # Nada foi lido: falha de conexao, o coletor reconecta.
             raise erros[-1]
-        return {t: out.get(t) for t in tags}
+        return {**extra, **{t: out.get(t) for t in tags}}
 
     async def read(self, tags: list[str]) -> dict[str, object]:
         return await asyncio.to_thread(self._read_all, tags)
