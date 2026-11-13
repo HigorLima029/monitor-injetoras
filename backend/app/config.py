@@ -74,6 +74,11 @@ class Settings:
     # Vazio = tela da Beckhoff desligada (com aviso); os dados ADS seguem normais.
     cerhost_exe: str = _path(os.getenv("CERHOST_EXE", "")) if os.getenv("CERHOST_EXE", "").strip() else ""
     cerhost_display: int = int(os.getenv("CERHOST_DISPLAY", "99"))
+    # Prefixo Wine DEDICADO ao CERHost (opcional). Com ele, ao parar a ponte roda `wineserver -k`
+    # só nesse prefixo. Vazio = usa o prefixo herdado e nunca roda `wineserver -k`
+    # (mataria outros programas Wine do mesmo usuário).
+    cerhost_wineprefix: str = (_path(os.getenv("CERHOST_WINEPREFIX", ""))
+                               if os.getenv("CERHOST_WINEPREFIX", "").strip() else "")
 
 
 settings = Settings()
