@@ -41,7 +41,12 @@ def test_crud_pela_api(api):
     assert new["has_view_password"] is True and new["has_control_password"] is True
     assert "vnc_view_password" not in new
     listing = client.get("/api/machines")
-    assert "segredo" not in listing.text and "segredo" not in client.get("/api/info").text
+    assert "segredo" not in listing.text
+    client.post(f"/api/machines/{new['id']}/activate")  # ativa a máquina COM senha
+    info = client.get("/api/info")
+    assert info.json()["machine_id"] == new["id"] and info.json()["vnc_control"] is True
+    assert "segredo" not in info.text
+    client.post(f"/api/machines/{a}/activate")
     data = listing.json()
     assert data["active_id"] == a and len(data["machines"]) == 3
     assert all("status" in m for m in data["machines"])
@@ -113,3 +118,26 @@ def test_sem_maquina_ativa_503(tmp_path):
             assert client.get("/api/info").status_code == 503
     finally:
         del main.app.state.manager
+
+
+def test_put_parcial_preserva_campos(api):
+    client, store, a, b = api
+    m = store.add(Machine(None, "C", "em63", "10.0.0.5", vnc_port=5901, namespace=6,
+                          vnc_enabled=True, notes="linha 3"))
+    r = client.put(f"/api/machines/{m.id}", json={"name": "Nova"})
+    assert r.status_code == 200 and r.json()["name"] == "Nova"
+    got = store.get(m.id)
+    assert (got.vnc_port, got.namespace, got.vnc_enabled, got.notes, got.host, got.kind) == \
+        (5901, 6, True, "linha 3", "10.0.0.5", "em63")
+    r = client.put(f"/api/machines/{m.id}", json={"namespace": None})
+    assert store.get(m.id).namespace is None
+
+
+def test_422_nao_ecoa_senhas(api):
+    client, *_ = api
+    r = client.post("/api/machines", json={"name": "X", "host": "h", "vnc_view_password": "SEGREDO"})
+    assert r.status_code == 422 and "SEGREDO" not in r.text
+    assert r.json()["detail"][0]["loc"][-1] == "kind"
+    r = client.post("/api/machines", json={"name": "X", "kind": "plc", "host": "h",
+                                           "vnc_view_password": "SEGREDO", "opcua_port": "abc"})
+    assert r.status_code == 422 and "SEGREDO" not in r.text

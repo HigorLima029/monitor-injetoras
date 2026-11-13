@@ -93,8 +93,8 @@ Regras de segurança:
   segundos sem uso (padrão 300), ou quando o operador libera ou fecha a página.
 - Entradas, saídas e trocas de controle ficam em `VNC_AUDIT_PATH`
   (`data/vnc_audit.log`).
-- As senhas ficam só no `.env` do servidor; o navegador nunca as recebe. Sem
-  `VNC_VIEW_PASSWORD`, a Tela ao vivo fica desligada.
+- As senhas ficam só no servidor (cadastro da máquina, em `data/monitor_config.db`);
+  o navegador nunca as recebe. Sem a senha de visualização, a Tela ao vivo fica desligada.
 - Quando ninguém está assistindo, o hub solta o painel depois de alguns segundos.
 
 Com o Monitor ligado, **aponte o Espelho IHM para o Monitor** (`<IP do Monitor>:5901`),
@@ -186,10 +186,13 @@ cd backend && .venv/bin/python -m pytest -q
 | `MACHINE_PROFILE` | `chy` | `chy` (gateway CHL3200) ou `em63` (painel B&R Euromap 63) |
 | `VNC_ENABLED` | `1` no `em63` | Mostra a Tela ao vivo (VNC do painel) |
 | `VNC_HOST` / `VNC_PORT` | IP do OPC-UA / `5900` | Onde está o VNC do painel |
-| `VNC_VIEW_PASSWORD` | vazio | Senha VNC de visualização do painel (obrigatória para a Tela ao vivo) |
+| `VNC_VIEW_PASSWORD` | vazio | Só na importação inicial; depois a senha fica no cadastro da máquina |
 | `VNC_CONTROL_PASSWORD` | vazio | Senha VNC de operação (vazia = ninguém opera) |
 | `VNC_CONTROL_TIMEOUT` | `300` | Segundos sem uso até o controle voltar a só visualização |
 | `VNC_TCP_PORT` | `5901` | Porta VNC comum do Monitor para o Espelho IHM (`0` desliga) |
+| `CONFIG_DB_PATH` | `data/monitor_config.db` | Cadastro de máquinas (SQLite) |
+| `MACHINES_DIR` | `data/machines` | Histórico e cache de tags de cada máquina |
+| `ADS_LOCAL_NET_ID` | vazio | AMS Net ID deste servidor (máquinas `ads`) |
 | `VNC_AUDIT_PATH` | `data/vnc_audit.log` | Registro de quem entrou e operou |
 
 ## API

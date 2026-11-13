@@ -215,7 +215,7 @@ def test_painel_liberado_quando_ninguem_assiste(panel):
     asyncio.run(run())
 
 
-def test_ws_e_api_de_controle(tmp_path, panel):
+def test_ws_e_api_de_controle(tmp_path, monkeypatch, panel):
     from fastapi.testclient import TestClient
 
     from types import SimpleNamespace
@@ -233,7 +233,7 @@ def test_ws_e_api_de_controle(tmp_path, panel):
     store.set_active(store.add(Machine(
         None, "Painel", "em63", "127.0.0.1", vnc_enabled=True, vnc_port=panel.port,
         vnc_view_password=VIEW, vnc_control_password=CONTROL)).id)
-    main.app.state.manager = MachineManager(store, cfg, source_factory=lambda m: SimulatedSource(seed=2))
+    monkeypatch.setattr(main.app.state, "manager", MachineManager(store, cfg, source_factory=lambda m: SimulatedSource(seed=2)), raising=False)
 
     def rfb(ws, password):
         assert ws.receive_bytes() == b"RFB 003.008\n"

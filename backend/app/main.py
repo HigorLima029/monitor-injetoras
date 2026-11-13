@@ -8,7 +8,8 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -63,6 +64,14 @@ def _machine(app_: FastAPI) -> Machine:
 
 
 # ---- maquinas -------------------------------------------------------------
+@app.exception_handler(RequestValidationError)
+async def _validation_error(_request, exc: RequestValidationError):
+    """422 sem eco do corpo enviado: ele pode conter as senhas VNC."""
+    errors = [{"loc": list(e.get("loc", ())), "msg": e.get("msg", ""), "type": e.get("type", "")}
+              for e in exc.errors()]
+    return JSONResponse({"detail": errors}, status_code=422)
+
+
 class MachineIn(BaseModel):
     name: str
     kind: str
@@ -77,6 +86,23 @@ class MachineIn(BaseModel):
     vnc_view_password: str = ""
     vnc_control_password: str = ""
     notes: str = ""
+
+
+class MachineUpdate(BaseModel):
+    """PUT parcial: so o que o cliente enviou muda."""
+    name: str | None = None
+    kind: str | None = None
+    host: str | None = None
+    client: str | None = None
+    opcua_port: int | None = None
+    namespace: int | None = None
+    ams_net_id: str | None = None
+    ads_port: int | None = None
+    vnc_enabled: bool | None = None
+    vnc_port: int | None = None
+    vnc_view_password: str | None = None
+    vnc_control_password: str | None = None
+    notes: str | None = None
 
 
 def _get_or_404(id: int) -> Machine:
@@ -105,11 +131,11 @@ def add_machine(body: MachineIn):
 
 
 @app.put("/api/machines/{id}")
-async def update_machine(id: int, body: MachineIn):
+async def update_machine(id: int, body: MachineUpdate):
     mgr = _mgr(app)
     _get_or_404(id)
     try:
-        m = mgr.store.update(id, body.model_dump())
+        m = mgr.store.update(id, body.model_dump(exclude_unset=True))
     except KeyError:
         raise HTTPException(404, "Máquina não encontrada")
     except ValueError as exc:

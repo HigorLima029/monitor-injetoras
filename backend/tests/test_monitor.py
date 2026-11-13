@@ -81,8 +81,8 @@ def test_api_com_simulador(tmp_path, monkeypatch):
         vnc_audit_path=None, ads_local_net_id="")
     store = MachineStore(str(tmp_path / "m.db"))
     store.set_active(store.add(Machine(None, "Demo", "demo", "127.0.0.1")).id)
-    main.app.state.manager = MachineManager(
-        store, cfg, source_factory=lambda m: SimulatedSource(cycle_seconds=0.05, seed=1))
+    monkeypatch.setattr(main.app.state, "manager", MachineManager(
+        store, cfg, source_factory=lambda m: SimulatedSource(cycle_seconds=0.05, seed=1)), raising=False)
     with TestClient(main.app) as client:
         col = main.app.state.manager.collector
         time.sleep(0.6)
