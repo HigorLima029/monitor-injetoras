@@ -168,7 +168,7 @@ async def activate_machine(id: int):
 @app.post("/api/machines/{id}/test")
 async def test_machine(id: int):
     m = _get_or_404(id)
-    latency = await _mgr(app).probe(m.host, m.status_port)
+    latency = await _mgr(app).check(m)
     return {"online": latency is not None, "latency_ms": latency}
 
 

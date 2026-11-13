@@ -92,6 +92,18 @@ def test_test_endpoint(api):
     assert client.post("/api/machines/999/test").status_code == 404
 
 
+def test_test_guarda_a_sonda(api):
+    client, store, a, b = api
+    main.app.state.manager._probes.clear()
+    antes = {m["id"]: m["status"] for m in client.get("/api/machines").json()["machines"]}
+    assert antes[b]["checked"] is None and antes[b]["online"] is None
+    r = client.post(f"/api/machines/{b}/test").json()
+    depois = {m["id"]: m["status"] for m in client.get("/api/machines").json()["machines"]}
+    assert depois[b]["checked"] is not None
+    assert depois[b]["online"] is r["online"]
+    assert depois[b]["latency_ms"] == r["latency_ms"]
+
+
 def test_ws_fecha_na_troca(api):
     client, store, a, b = api
     with client.websocket_connect("/ws") as ws:

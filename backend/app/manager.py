@@ -166,6 +166,13 @@ class MachineManager:
             await writer.wait_closed()
         return latency
 
+    async def check(self, m: Machine) -> float | None:
+        """Sonda uma máquina agora e guarda o resultado, para a lista mostrar o mesmo que o teste manual."""
+        latency = await self.probe(m.host, m.status_port, PROBE_TIMEOUT)
+        if self.store.get(m.id) is not None:  # pode ter sido apagada durante o teste
+            self._probes[m.id] = (latency, time.time())
+        return latency
+
     async def probe_all(self) -> None:
         machines = self.store.list()
         results = await asyncio.gather(
