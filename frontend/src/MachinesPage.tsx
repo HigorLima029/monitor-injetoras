@@ -289,11 +289,11 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
     }
   }
 
-  const text = (k: keyof Draft, label: string, extra: { hint?: string; placeholder?: string; list?: string; inputMode?: 'numeric'; type?: string; disabled?: boolean } = {}) => (
+  const text = (k: keyof Draft, label: string, extra: { hint?: string; placeholder?: string; list?: string; inputMode?: 'numeric'; type?: string; disabled?: boolean; maxLength?: number } = {}) => (
     <label className="field">
       {label}
       <input
-        type={extra.type ?? 'text'} inputMode={extra.inputMode} list={extra.list} disabled={extra.disabled}
+        type={extra.type ?? 'text'} inputMode={extra.inputMode} list={extra.list} disabled={extra.disabled} maxLength={extra.maxLength}
         value={d[k] as string} placeholder={extra.placeholder}
         autoComplete={extra.type === 'password' ? 'new-password' : 'off'}
         aria-invalid={err(k) ? true : undefined}
@@ -352,7 +352,7 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
               {opc && text('vnc_port', 'Porta VNC', { inputMode: 'numeric' })}
               <div className="stack-tight">
                 {text('vnc_view_password', 'Senha de visualização', {
-                  type: 'password', placeholder: keepHint(machine?.has_view_password),
+                  type: 'password', maxLength: d.kind === 'ads' ? 8 : undefined, placeholder: keepHint(machine?.has_view_password),
                   hint: opc ? 'Só assistir a tela.' : 'Só assistir a tela. Senhas desta tela no Monitor, até 8 caracteres.', disabled: d.clear_view && !retarget,
                 })}
                 {machine?.has_view_password && !retarget && (
@@ -362,7 +362,7 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
               </div>
               <div className="stack-tight">
                 {text('vnc_control_password', 'Senha de operação', {
-                  type: 'password', placeholder: keepHint(machine?.has_control_password),
+                  type: 'password', maxLength: d.kind === 'ads' ? 8 : undefined, placeholder: keepHint(machine?.has_control_password),
                   hint: opc ? 'Opcional. Quem a digitar pode assumir o controle da tela.' : 'Opcional. Quem a digitar pode assumir o controle da tela. Até 8 caracteres.', disabled: d.clear_control && !retarget,
                 })}
                 {machine?.has_control_password && !retarget && (
