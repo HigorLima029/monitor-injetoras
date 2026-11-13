@@ -190,7 +190,10 @@ class Collector:
         }
 
     def _broadcast(self) -> None:
-        payload = self.live()
+        self.notify(self.live())
+
+    def notify(self, payload: dict) -> None:
+        """Coloca `payload` na fila de cada assinante (descarta o mais antigo se estiver cheia)."""
         for q in list(self._subscribers):
             if q.full():
                 try:
