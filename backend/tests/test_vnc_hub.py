@@ -215,19 +215,25 @@ def test_painel_liberado_quando_ninguem_assiste(panel):
     asyncio.run(run())
 
 
-def test_ws_e_api_de_controle(monkeypatch, panel):
+def test_ws_e_api_de_controle(tmp_path, panel):
     from fastapi.testclient import TestClient
 
-    from app import main
-    from app.collector import Collector
-    from app.sources import SimulatedSource
-    from app.storage import Storage
+    from types import SimpleNamespace
 
-    monkeypatch.setattr(main, "settings", main.settings.__class__(**{
-        **main.settings.__dict__, "simulate": False, "vnc_enabled": True, "vnc_host": "127.0.0.1",
-        "vnc_port": panel.port, "vnc_view_password": VIEW, "vnc_control_password": CONTROL,
-        "vnc_tcp_port": 0, "vnc_audit_path": None}))
-    main.app.state.collector = Collector(SimulatedSource(seed=2), Storage(":memory:"), poll_seconds=1)
+    from app import main
+    from app.machines import Machine, MachineStore
+    from app.manager import MachineManager
+    from app.sources import SimulatedSource
+
+    cfg = SimpleNamespace(
+        machines_dir=str(tmp_path / "machines"), poll_seconds=1, full_poll_seconds=60,
+        retention_days=7, vnc_tcp_port=0, vnc_tcp_bind="127.0.0.1", vnc_control_timeout=300,
+        vnc_audit_path=None, ads_local_net_id="")
+    store = MachineStore(str(tmp_path / "m.db"))
+    store.set_active(store.add(Machine(
+        None, "Painel", "em63", "127.0.0.1", vnc_enabled=True, vnc_port=panel.port,
+        vnc_view_password=VIEW, vnc_control_password=CONTROL)).id)
+    main.app.state.manager = MachineManager(store, cfg, source_factory=lambda m: SimulatedSource(seed=2))
 
     def rfb(ws, password):
         assert ws.receive_bytes() == b"RFB 003.008\n"

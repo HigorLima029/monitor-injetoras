@@ -103,6 +103,20 @@ não direto no painel: se outro cliente se conectar direto, o painel derruba um 
 Os dados de produção (OPC-UA) continuam **só leitura**: o controle remoto vale só
 para a tela, e só com a senha de operação.
 
+## Máquinas
+
+As máquinas são cadastradas na página **Máquinas** do Monitor (nome, tipo `chy`,
+`em63`, `ads` ou `demo`, IP, portas, VNC e senhas), e a troca da máquina aberta
+é feita ali, sem editar o `.env` nem reiniciar. Cada máquina tem seu próprio
+histórico em `data/machines/<id>.db`.
+
+Na **primeira subida**, com o cadastro vazio, o Monitor importa a máquina do
+`.env` antigo (`OPCUA_URL`, `MACHINE_PROFILE`, `VNC_*` etc., ou uma `demo` com
+`SIMULATE=1`) e copia o histórico existente. Variáveis novas no servidor:
+`CONFIG_DB_PATH` (`data/monitor_config.db`), `MACHINES_DIR` (`data/machines`) e
+`ADS_LOCAL_NET_ID` (AMS Net ID do servidor, para máquinas `ads`).
+As senhas VNC nunca saem do servidor: a API só informa se existem.
+
 ## Como funciona
 
 ```
@@ -182,7 +196,9 @@ cd backend && .venv/bin/python -m pytest -q
 
 | Rota | Retorno |
 |---|---|
-| `GET /api/info` | Nome da máquina, endereço, zonas do canhão, rótulos |
+| `GET/POST /api/machines`, `PUT/DELETE /api/machines/{id}` | Cadastro de máquinas (sem as senhas VNC) e status de cada uma |
+| `POST /api/machines/{id}/activate` · `/test` | Abre a máquina (troca a ativa) · testa se responde na rede |
+| `GET /api/info` | Máquina aberta: nome, endereço, tipo, zonas do canhão, rótulos |
 | `GET /api/live` | Estado + valores atuais dos KPIs |
 | `GET /api/history?tags=A,B&minutes=60` | Séries no tempo (reduzidas para ~300 pontos) |
 | `GET /api/production?hours=8` | Peças e refugo por intervalo, ciclo médio |

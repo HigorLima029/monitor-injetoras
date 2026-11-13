@@ -70,10 +70,21 @@ def test_api_com_simulador(tmp_path, monkeypatch):
 
     from app import main
 
-    col = Collector(SimulatedSource(cycle_seconds=0.05, seed=1), Storage(":memory:"),
-                    poll_seconds=0.05, full_poll_seconds=0.2)
-    main.app.state.collector = col
+    from types import SimpleNamespace
+
+    from app.machines import Machine, MachineStore
+    from app.manager import MachineManager
+
+    cfg = SimpleNamespace(
+        machines_dir=str(tmp_path / "machines"), poll_seconds=0.05, full_poll_seconds=0.2,
+        retention_days=7, vnc_tcp_port=0, vnc_tcp_bind="127.0.0.1", vnc_control_timeout=300,
+        vnc_audit_path=None, ads_local_net_id="")
+    store = MachineStore(str(tmp_path / "m.db"))
+    store.set_active(store.add(Machine(None, "Demo", "demo", "127.0.0.1")).id)
+    main.app.state.manager = MachineManager(
+        store, cfg, source_factory=lambda m: SimulatedSource(cycle_seconds=0.05, seed=1))
     with TestClient(main.app) as client:
+        col = main.app.state.manager.collector
         time.sleep(0.6)
         live = client.get("/api/live").json()
         assert live["status"]["connected"] is True
