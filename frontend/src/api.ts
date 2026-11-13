@@ -26,11 +26,54 @@ export interface Zone {
   max: string
 }
 
+export type MachineKind = 'chy' | 'em63' | 'ads' | 'demo'
+
+export interface MachineStatus {
+  online: boolean | null
+  latency_ms: number | null
+  checked: number | null
+  state?: string
+}
+
+export interface Machine {
+  id: number
+  client: string
+  name: string
+  kind: MachineKind
+  host: string
+  opcua_port: number
+  namespace: number | null
+  ams_net_id: string
+  ads_port: number
+  vnc_enabled: boolean
+  vnc_port: number
+  notes: string
+  has_view_password: boolean
+  has_control_password: boolean
+  profile: 'chy' | 'em63' | 'ads'
+  opcua_url: string
+  status?: MachineStatus
+}
+
+/** Campos enviados ao cadastrar/editar; senha em branco = não enviar (o servidor mantém a atual). */
+export type MachineInput = Partial<Omit<Machine, 'id' | 'status' | 'has_view_password' | 'has_control_password' | 'profile' | 'opcua_url'>> & {
+  vnc_view_password?: string
+  vnc_control_password?: string
+}
+
+export interface MachineList {
+  active_id: number | null
+  machines: Machine[]
+}
+
 export interface Info {
+  machine_id?: number
+  kind?: MachineKind
+  client?: string
   machine_name: string
   opcua_url: string
   simulate: boolean
-  profile?: 'chy' | 'em63'
+  profile?: 'chy' | 'em63' | 'ads'
   vnc?: boolean
   vnc_control?: boolean
   poll_seconds: number
@@ -91,6 +134,49 @@ export async function getJson<T>(url: string): Promise<T> {
   return res.json() as Promise<T>
 }
 
+/** Traduz o corpo de erro do FastAPI ({detail: texto} ou {detail: [{loc, msg}]}) em frases para a tela. */
+async function errorMessages(res: Response): Promise<string[]> {
+  try {
+    const body = await res.json()
+    if (typeof body?.detail === 'string') return [body.detail]
+    if (Array.isArray(body?.detail)) {
+      return body.detail.map((d: { loc?: unknown[]; msg?: string }) => {
+        const campo = Array.isArray(d.loc) ? String(d.loc[d.loc.length - 1] ?? '') : ''
+        return campo ? `${campo}: ${d.msg ?? 'valor inválido'}` : (d.msg ?? 'valor inválido')
+      })
+    }
+  } catch {
+    /* corpo vazio ou não-JSON */
+  }
+  return [`O servidor respondeu ${res.status}`]
+}
+
+export class ApiError extends Error {
+  messages: string[]
+  constructor(messages: string[]) {
+    super(messages.join(' · '))
+    this.messages = messages
+  }
+}
+
+async function send<T>(method: string, url: string, body?: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: body === undefined ? undefined : { 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  })
+  if (!res.ok) throw new ApiError(await errorMessages(res))
+  return (res.status === 204 ? undefined : await res.json()) as T
+}
+
+export const listMachines = () => getJson<MachineList>('/api/machines')
+export const saveMachine = (m: MachineInput, id?: number) =>
+  id === undefined ? send<Machine>('POST', '/api/machines', m) : send<Machine>('PUT', `/api/machines/${id}`, m)
+export const deleteMachine = (id: number) => send<void>('DELETE', `/api/machines/${id}`)
+export const activateMachine = (id: number) => send<Machine>('POST', `/api/machines/${id}/activate`)
+export const testMachine = (id: number) =>
+  send<{ online: boolean; latency_ms: number | null }>('POST', `/api/machines/${id}/test`)
+
 /** Busca uma URL e repete a cada `everyMs`. */
 export function usePoll<T>(url: string | null, everyMs = 30000) {
   const [data, setData] = useState<T | null>(null)
@@ -116,6 +202,7 @@ export function usePoll<T>(url: string | null, everyMs = 30000) {
 export function useLive() {
   const [live, setLive] = useState<Live | null>(null)
   const [linked, setLinked] = useState(false)
+  const [change, setChange] = useState<{ id: number; seq: number } | null>(null)
   const retry = useRef<number | undefined>(undefined)
 
   useEffect(() => {
@@ -138,13 +225,24 @@ export function useLive() {
         setLinked(true)
         window.clearInterval(poll)
       }
-      socket.onmessage = (ev) => setLive(JSON.parse(ev.data) as Live)
+      let changed = false
+      socket.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data)
+        if (msg.type === 'machine_changed') {
+          changed = true
+          setChange((c) => ({ id: msg.machine_id as number, seq: (c?.seq ?? 0) + 1 }))
+        } else {
+          setLive(msg as Live)
+        }
+      }
       socket.onclose = () => {
         setLinked(false)
         if (stopped) return
         window.clearInterval(poll)
         poll = window.setInterval(fallback, 5000)
-        retry.current = window.setTimeout(open, 5000)
+        // Troca de máquina: o servidor fecha de propósito, então reconecta já no coletor novo.
+        retry.current = window.setTimeout(open, changed ? 300 : 5000)
+        if (changed) fallback()
       }
     }
     fallback()
@@ -157,7 +255,7 @@ export function useLive() {
     }
   }, [])
 
-  return { live, linked }
+  return { live, linked, changedTo: change?.id ?? null, changeSeq: change?.seq ?? 0 }
 }
 
 export function num(v: number | string | null | undefined): number | null {

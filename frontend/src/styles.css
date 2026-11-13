@@ -381,3 +381,54 @@ tr.nonzero td.value { font-weight: 600; }
 .vnc-bar.warn svg { color: var(--warning-ink); }
 .vnc-panel.operando { outline: 3px solid var(--warning); outline-offset: -3px; }
 .btn:disabled { opacity: .6; cursor: default; }
+
+/* ---- máquinas e seletor do topo ---------------------------------------- */
+.banner.info { border-left-color: var(--series-1); }
+.picker { display: inline-flex; align-items: center; gap: 8px; font-size: 13px; color: var(--ink-2); min-width: 0; }
+select, textarea, .field input:not([type='checkbox']) {
+  font: inherit; color: var(--ink); background: var(--panel); border: 1px solid var(--rule);
+  border-radius: var(--radius-sm); padding: 7px 10px; min-width: 0; width: 100%;
+}
+.picker select { width: auto; max-width: 340px; padding: 5px 8px; font-size: 14px; }
+.field input[aria-invalid='true'] { border-color: var(--critical); }
+.field-error { color: var(--critical-ink); }
+.field-hint { color: var(--ink-3); }
+textarea { resize: vertical; }
+
+.machines-layout { display: grid; gap: 16px; align-items: start; grid-template-columns: minmax(0, 1fr); }
+.machines-layout.with-form { grid-template-columns: minmax(0, 1fr) minmax(300px, 380px); }
+.machine-form { position: sticky; top: 16px; display: grid; gap: 14px; }
+.machine-form .panel-head { margin: 0; align-items: center; }
+.form-grid { display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr); }
+.form-group { border: 1px solid var(--rule); border-radius: var(--radius-sm); padding: 10px 12px 12px; margin: 0; display: grid; gap: 10px; min-width: 0; }
+.form-group legend { font-size: 13px; color: var(--ink-2); padding: 0 6px; }
+.form-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.btn.icon { padding: 5px; }
+.btn.danger { background: var(--critical); border-color: var(--critical); color: #fff; }
+.btn.primary:disabled { opacity: .5; }
+
+.machine-list { list-style: none; margin: 0; padding: 0; display: grid; }
+.machine-row { display: flex; gap: 12px 16px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 12px 0; border-top: 1px solid var(--grid); }
+.machine-row:first-child { border-top: 0; padding-top: 2px; }
+.machine-row.active .machine-title strong { color: var(--ink); }
+.machine-main { min-width: 0; display: grid; gap: 3px; }
+.machine-title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 16px; }
+.machine-sub { display: flex; gap: 4px 14px; flex-wrap: wrap; font-size: 13px; color: var(--ink-2); align-items: center; }
+.machine-actions { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+.confirm { display: inline-flex; gap: 6px; flex-wrap: wrap; }
+.chip { font-size: 12px; font-weight: 600; padding: 1px 9px; border-radius: 999px; background: color-mix(in srgb, var(--good) 16%, var(--panel)); color: var(--good-ink); border: 1px solid color-mix(in srgb, var(--good) 45%, var(--panel)); }
+.presence { display: inline-flex; align-items: center; gap: 6px; }
+.presence i { width: 9px; height: 9px; border-radius: 50%; background: var(--off); display: inline-block; }
+.presence.on i { background: var(--good); }
+.presence.off i { background: var(--critical); }
+.presence.checking i { background: var(--warning); }
+.presence.on { color: var(--good-ink); }
+.presence.off { color: var(--critical-ink); }
+
+@media (max-width: 820px) {
+  .machines-layout.with-form { grid-template-columns: minmax(0, 1fr); }
+  .machine-form { position: static; order: -1; }
+  .picker { width: 100%; }
+  .picker select { flex: 1; max-width: none; }
+}
+.banner > svg { flex: none; margin-top: 2px; }
