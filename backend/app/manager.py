@@ -18,6 +18,7 @@ log = logging.getLogger(__name__)
 
 PROBE_INTERVAL = 30.0
 PROBE_TIMEOUT = 3.0
+CLOSE_TIMEOUT = 5.0
 
 
 class MachineManager:
@@ -28,6 +29,7 @@ class MachineManager:
         self.machine: Machine | None = None
         self.collector: Collector | None = None
         self.hub: VncHub | None = None
+        self.close_timeout = CLOSE_TIMEOUT  # limite do desligamento da máquina anterior
         self._lock = asyncio.Lock()
         self._probes: dict[int, tuple[float | None, float]] = {}  # id -> (latência ms, ts)
         self._status_task: asyncio.Task | None = None
@@ -36,7 +38,10 @@ class MachineManager:
     async def start(self) -> None:
         active = self.store.active_id()
         if active is not None and self.store.get(active) is not None:
-            await self.activate(active)
+            try:
+                await self.activate(active)
+            except Exception:  # o servidor precisa subir mesmo sem a máquina ativa
+                log.exception("falha ao abrir a máquina ativa %s", active)
         self._status_task = asyncio.create_task(self._status_loop(), name="status-maquinas")
 
     async def stop(self) -> None:
@@ -85,14 +90,28 @@ class MachineManager:
         return VncHub(m.host, m.vnc_port, m.vnc_view_password, m.vnc_control_password,
                       control_timeout=s.vnc_control_timeout, name=m.name, audit_path=s.vnc_audit_path)
 
+    async def _bounded(self, what: str, coro) -> None:
+        """Desligamento com limite de tempo: máquina "meio aberta" não trava a troca."""
+        try:
+            await asyncio.wait_for(coro, self.close_timeout)
+        except asyncio.TimeoutError:
+            log.warning("%s demorou mais de %ss para fechar; seguindo", what, self.close_timeout)
+        except Exception:
+            log.exception("falha ao fechar %s", what)
+
     async def _close_current(self) -> None:
         old_c, old_h = self.collector, self.hub
         self.machine = self.collector = self.hub = None
-        if old_c is not None:
-            await old_c.stop()
-            old_c.storage.close()
-        if old_h is not None:
-            await old_h.close()
+        try:
+            if old_c is not None:
+                await self._bounded("coletor", old_c.stop())
+        finally:
+            try:
+                if old_c is not None:
+                    old_c.storage.close()
+            finally:
+                if old_h is not None:
+                    await self._bounded("hub VNC", old_h.close())
 
     async def activate(self, machine_id: int) -> Machine:
         async with self._lock:

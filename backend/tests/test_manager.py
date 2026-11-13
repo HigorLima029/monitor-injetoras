@@ -160,3 +160,108 @@ def test_status_de_nao_ativa_e_ativa(tmp_path):
             await server.wait_closed()
 
     asyncio.run(run())
+
+
+class _SlowClose:
+    """Fonte cujo close() demora muito (máquina meio aberta)."""
+
+    def __init__(self):
+        from app.sources import SimulatedSource
+        self._s = SimulatedSource()
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+    async def close(self):
+        await asyncio.sleep(30)
+
+
+def test_fechamento_lento_tem_limite(tmp_path):
+    async def run():
+        from app.sources import SimulatedSource
+        store = MachineStore(str(tmp_path / "m.db"))
+        a = store.add(_demo("A")).id
+        b = store.add(_demo("B")).id
+        mgr = MachineManager(store, _settings(tmp_path),
+                             source_factory=lambda m: _SlowClose() if m.id == a else SimulatedSource())
+        mgr.close_timeout = 0.3
+        try:
+            await mgr.activate(a)
+            t0 = asyncio.get_running_loop().time()
+            await mgr.activate(b)
+            assert asyncio.get_running_loop().time() - t0 < 1.5
+            assert mgr.machine.id == b
+        finally:
+            await mgr.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_hub_vnc_troca_e_mantem_a_porta(tmp_path):
+    async def run():
+        import socket
+        with socket.socket() as s:
+            s.bind(("127.0.0.1", 0))
+            port = s.getsockname()[1]
+        ms = [Machine(None, n, "em63", "127.0.0.1", vnc_port=59999, vnc_view_password="vista")
+              for n in "AB"]
+        store, mgr, (a, b) = _setup(tmp_path, ms)
+        mgr.settings.vnc_tcp_port = port
+        try:
+            await mgr.activate(a)
+            old = mgr.hub
+            assert old is not None
+            _, w = await asyncio.open_connection("127.0.0.1", port)
+            w.close()
+            await mgr.activate(b)
+            assert mgr.hub is not None and mgr.hub is not old and old._closed
+            _, w = await asyncio.open_connection("127.0.0.1", port)
+            w.close()
+            assert mgr.hub.tcp_port == port
+        finally:
+            await mgr.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_start_sobrevive_a_falha_na_ativa(tmp_path):
+    async def run():
+        def boom(m):
+            raise RuntimeError("quebrou")
+
+        store = MachineStore(str(tmp_path / "m.db"))
+        a = store.add(_demo("A")).id
+        store.set_active(a)
+        mgr = MachineManager(store, _settings(tmp_path), source_factory=boom)
+        try:
+            await mgr.start()
+            assert mgr._status_task is not None and not mgr._status_task.done()
+            assert mgr.collector is None
+        finally:
+            await mgr.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_falha_ao_parar_coletor_ainda_fecha_hub(tmp_path):
+    async def run():
+        ms = [Machine(None, n, "em63", "127.0.0.1", vnc_view_password="v") for n in "AB"]
+        store, mgr, (a, b) = _setup(tmp_path, ms)
+        try:
+            await mgr.activate(a)
+            old_h = mgr.hub
+
+            async def bad():
+                raise RuntimeError("x")
+
+            mgr.collector.stop = bad
+            await mgr.activate(b)
+            assert old_h._closed
+        finally:
+            await mgr.stop()
+            store.close()
+
+    asyncio.run(run())
