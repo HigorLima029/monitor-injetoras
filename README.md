@@ -119,7 +119,7 @@ No servidor (Debian/Ubuntu):
 
 ```bash
 sudo dpkg --add-architecture i386 && sudo apt-get update   # Wine 32 bits
-sudo apt-get install -y xvfb openbox xdotool wmctrl x11vnc wine32:i386
+sudo apt-get install -y wine wine32:i386 xvfb openbox xdotool wmctrl x11vnc
 ```
 
 No `.env`:
@@ -129,6 +129,8 @@ No `.env`:
 - `CERHOST_WINEPREFIX=` prefixo Wine dedicado ao CERHost (opcional). Com ele, ao encerrar a
   ponte roda `wineserver -k` só nesse prefixo; vazio = usa o prefixo herdado e nunca roda
   `wineserver -k`.
+- `CERHOST_PIDFILE=data/cerhost.pids` onde a ponte anota os pids dos processos que abriu (para
+  limpar as sobras se o Monitor cair sem desligar a ponte).
 
 No cadastro da máquina `ads` (página **Máquinas**), **ligue a Tela ao vivo** (vem desligada na
 Beckhoff) e defina as duas senhas VNC: a de visualização (obrigatória) e a de operação (vazia =
@@ -142,6 +144,20 @@ sozinha se o CERHost cair. O robô de teclado (xdotool) só digita o IP no diál
 operador fizer. Faltando alguma ferramenta ou o `CERHOST.exe`, o Monitor sobe normal, os dados
 ADS seguem e a Tela ao vivo diz o que falta (`GET /api/vnc/status` traz `bridge.state` e
 `bridge.error`). Operar só em contingência, com alguém no local.
+
+Se o CERHost, o Xvfb, o Openbox ou o x11vnc morrer sozinho, o log do Monitor mostra qual foi, o
+código de saída e as últimas linhas do que ele escreveu. Os processos da ponte morrem junto com o
+Monitor e ficam anotados em `data/cerhost.pids` (`CERHOST_PIDFILE`): se o Monitor cair feio
+(`kill -9`, falta de memória), a próxima subida encerra as sobras dele antes de abrir a tela.
+Se mesmo assim sobrar algo (a Tela ao vivo diz "a tela virtual :99 já está em uso"), com o
+Monitor parado:
+
+```bash
+pkill -f 'x11vnc -display :99'; pkill -if 'cerhost\.exe'; pkill -f 'Xvfb :99'; rm -f data/cerhost.pids
+```
+
+(troque `:99` pelo `CERHOST_DISPLAY`; o Openbox da tela virtual sai sozinho quando o Xvfb sai.
+Com `CERHOST_WINEPREFIX`, rode também `WINEPREFIX=<prefixo> wineserver -k`.)
 
 ## Máquinas
 
@@ -243,6 +259,7 @@ cd backend && .venv/bin/python -m pytest -q
 | `CERHOST_EXE` | vazio | Caminho do `CERHOST.exe` (tela da Beckhoff; vazio = desligada) |
 | `CERHOST_DISPLAY` | `99` | Tela virtual (Xvfb) da ponte CERHost |
 | `CERHOST_WINEPREFIX` | vazio | Prefixo Wine dedicado ao CERHost (opcional) |
+| `CERHOST_PIDFILE` | `data/cerhost.pids` | Pids da ponte CERHost (limpa as sobras se o Monitor cair) |
 
 ## API
 

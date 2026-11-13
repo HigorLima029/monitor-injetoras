@@ -99,3 +99,7 @@
 - [ ] `CERHOST_EXE` no `.env`, ligar a tela na Beckhoff XMold com as duas senhas, abrir: tela aparece na Tela ao vivo; assumir controle com a senha de operação, rolar/clicar; Ctrl para teclas físicas.
 - [ ] Trocar para a B&R e voltar 3×: `pgrep -a -f "Xvfb :99|x11vnc|CERHOST"` vazio quando a B&R está aberta.
 - [ ] Tirar o cabo da Beckhoff por 30 s e recolocar: a tela volta sozinha.
+- [ ] `_NET_WM_PID` da janela do CERHost é o pid do `wine` que a ponte abriu: `xdotool search --pid <pid do wine> --name .` (com `DISPLAY=:99` e o `XAUTHORITY` da pasta privada) lista a janela principal; se não listar, o robô nunca digita (ajustar antes de seguir).
+- [ ] Título do diálogo de conexão (alt+f, Return): anotar o nome (`xdotool getactivewindow getwindowname`); conferir que é outra janela do mesmo pid e que a principal segue "Remote Display Control for Windows CE" enquanto ele está aberto.
+- [ ] Durante o cabo puxado: anotar o que acontece com o título da janela principal (volta ao original? some? aparece diálogo de erro?) e o que o log do Monitor mostra até a tela voltar.
+- [ ] Fechar o terminal do `run.sh` (sem Ctrl+C): `pgrep -a -f "Xvfb :99|x11vnc|CERHOST"` vazio em poucos segundos; subir de novo e a tela volta sem "já está em uso".
