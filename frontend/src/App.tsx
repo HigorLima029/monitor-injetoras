@@ -16,7 +16,8 @@ const PAGES: { id: PageId; label: string; icon: ReactNode; render: (p: PageProps
   { id: 'maquinas', label: 'Máquinas', icon: <Server size={18} />, render: () => null /* desenhada no App, que passa os callbacks */ },
   { id: 'geral', label: 'Visão geral', icon: <LayoutDashboard size={18} />, render: (p) => <Overview {...p} /> },
   { id: 'painel', label: 'Painel da máquina', icon: <Monitor size={18} />, render: (p) => <HmiPanel status={p.live?.status ?? null} /> },
-  { id: 'tela', label: 'Tela ao vivo', icon: <MonitorPlay size={18} />, render: () => <TelaAoVivo /> },
+  // key: trocar de máquina monta uma Tela ao vivo nova (senha e sessão do painel novo).
+  { id: 'tela', label: 'Tela ao vivo', icon: <MonitorPlay size={18} />, render: (p) => <TelaAoVivo key={p.info.machine_id} machineName={p.info.machine_name} /> },
   { id: 'temperaturas', label: 'Temperaturas', icon: <Thermometer size={18} />, render: (p) => <Temperatures {...p} /> },
   { id: 'producao', label: 'Produção', icon: <Package size={18} />, render: (p) => <ProductionPage {...p} /> },
   { id: 'alarmes', label: 'Alarmes', icon: <AlertTriangle size={18} />, render: (p) => <AlarmsPage {...p} /> },
@@ -34,8 +35,8 @@ function pageFromHash(): PageId {
 export default function App() {
   const [page, setPage] = useState<PageId>(pageFromHash)
   const { choice, setChoice, tokens } = useTheme()
-  const { live, linked, changedTo, changeSeq } = useLive()
-  const { data: info, error: infoError, reload: reloadInfo } = usePoll<Info>('/api/info', 300000)
+  const { live, linked, changedTo, changeSeq, openSeq } = useLive()
+  const { data: info, error: infoError, reload: reloadInfo, set: setInfo } = usePoll<Info>('/api/info', 30000)
   const { data: machines, reload: reloadMachines } = usePoll<MachineList>('/api/machines', 30000)
   const [now, setNow] = useState(() => Date.now() / 1000)
   const [switchError, setSwitchError] = useState<string | null>(null)
@@ -54,22 +55,37 @@ export default function App() {
   const noMachine = machines !== null && machines.active_id === null
 
   // A máquina aberta mudou (por esta aba ou por outra pessoa): recarrega tudo e avisa por 8 s.
+  // Logo depois da troca o servidor ainda pode estar fechando a máquina anterior (503 em 4G):
+  // tenta o /api/info de novo, cada vez esperando mais, por uns 30 s, até vir a máquina nova.
   useEffect(() => {
     if (changeSeq === 0) return
     let stale = false
+    const wait = (ms: number) => new Promise((done) => window.setTimeout(done, ms))
     ;(async () => {
-      const [list, fresh] = await Promise.all([
-        getJson<MachineList>('/api/machines').catch(() => null),
-        getJson<Info>('/api/info').catch(() => null),
-      ])
+      reloadMachines()
+      let fresh: Info | null = null
+      for (const ms of [0, 500, 1000, 2000, 4000, 8000, 8000, 8000]) {
+        if (ms) await wait(ms)
+        if (stale) return
+        const got = await getJson<Info>('/api/info').catch(() => null)
+        if (stale) return
+        if (got && (changedTo === null || got.machine_id === changedTo)) { fresh = got; break }
+      }
+      if (fresh) setInfo(fresh)
+      reloadInfo()
+      const list = await getJson<MachineList>('/api/machines').catch(() => null)
       if (stale) return
       reloadMachines()
-      reloadInfo()
       const name = fresh?.machine_name ?? list?.machines.find((m) => m.id === changedTo)?.name
       if (name) setChangedNotice(`A máquina aberta mudou para ${name}.`)
     })()
     return () => { stale = true }
-  }, [changeSeq, changedTo, reloadInfo, reloadMachines])
+  }, [changeSeq, changedTo, reloadInfo, reloadMachines, setInfo])
+
+  // O fluxo ao vivo voltou depois de cair: a máquina pode ter mudado enquanto isso.
+  useEffect(() => {
+    if (openSeq > 1) { reloadInfo(); reloadMachines() }
+  }, [openSeq, reloadInfo, reloadMachines])
 
   useEffect(() => {
     if (!changedNotice) return

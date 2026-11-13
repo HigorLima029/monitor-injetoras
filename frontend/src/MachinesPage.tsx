@@ -23,13 +23,15 @@ interface Draft {
   vnc_port: string
   vnc_view_password: string
   vnc_control_password: string
+  clear_view: boolean
+  clear_control: boolean
   notes: string
 }
 
 const EMPTY: Draft = {
   client: 'Chen Hsong', name: '', kind: 'chy', host: '', opcua_port: '4840', namespace: '',
   ams_net_id: '', ads_port: '801', vnc_enabled: false, vnc_port: '5900',
-  vnc_view_password: '', vnc_control_password: '', notes: '',
+  vnc_view_password: '', vnc_control_password: '', clear_view: false, clear_control: false, notes: '',
 }
 
 function draftOf(m: Machine): Draft {
@@ -37,7 +39,7 @@ function draftOf(m: Machine): Draft {
     client: m.client, name: m.name, kind: m.kind, host: m.host, opcua_port: String(m.opcua_port),
     namespace: m.namespace === null ? '' : String(m.namespace), ams_net_id: m.ams_net_id,
     ads_port: String(m.ads_port), vnc_enabled: m.vnc_enabled, vnc_port: String(m.vnc_port),
-    vnc_view_password: '', vnc_control_password: '', notes: m.notes,
+    vnc_view_password: '', vnc_control_password: '', clear_view: false, clear_control: false, notes: m.notes,
   }
 }
 
@@ -45,6 +47,16 @@ function draftOf(m: Machine): Draft {
 const vncDefault = (k: MachineKind) => k === 'em63'
 
 const isPort = (v: string) => /^\d+$/.test(v) && +v >= 1 && +v <= 65535
+
+/**
+ * Na edição, trocar o IP ou a porta VNC faz o servidor apagar as senhas guardadas que não forem
+ * digitadas de novo (senão o painel novo receberia a resposta da senha antiga).
+ */
+function retargets(d: Draft, orig: Draft | null): boolean {
+  if (!orig) return false
+  const opc = d.kind === 'chy' || d.kind === 'em63'
+  return orig.host.trim() !== d.host.trim() || (opc && (+d.vnc_port || 5900) !== +orig.vnc_port)
+}
 
 function validate(d: Draft): Partial<Record<keyof Draft, string>> {
   const e: Partial<Record<keyof Draft, string>> = {}
@@ -75,9 +87,15 @@ function toInput(d: Draft, orig: Draft | null): MachineInput {
     if (changed('namespace')) body.namespace = d.namespace.trim() ? +d.namespace : null
     if (changed('vnc_enabled')) body.vnc_enabled = d.vnc_enabled
     if (changed('vnc_port')) body.vnc_port = +d.vnc_port || 5900
-    // Senha em branco = não enviar: o servidor mantém a que já existe.
-    if (d.vnc_view_password) body.vnc_view_password = d.vnc_view_password
-    if (d.vnc_control_password) body.vnc_control_password = d.vnc_control_password
+    // Senha em branco = não enviar: o servidor mantém a que já existe. "Remover" apaga a guardada.
+    const target = retargets(d, orig)  // trocando o alvo, o servidor já apaga o que não for digitado
+    if (d.clear_view && !target) body.clear_vnc_view_password = true
+    else if (d.vnc_view_password) body.vnc_view_password = d.vnc_view_password
+    if (d.clear_control && !target) body.clear_vnc_control_password = true
+    else if (d.vnc_control_password) body.vnc_control_password = d.vnc_control_password
+  } else if (kindChanged) {
+    // Beckhoff e simulada não têm Tela ao vivo (por enquanto): volta ao padrão do tipo.
+    body.vnc_enabled = null
   }
   if (d.kind === 'ads') {
     if (changed('ams_net_id')) body.ams_net_id = d.ams_net_id.trim()
@@ -240,6 +258,9 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
   const err = (k: keyof Draft) => (submitted || touched[k] ? errors[k] : undefined)
   const blur = (k: keyof Draft) => () => setTouched((t) => ({ ...t, [k]: true }))
   const opc = d.kind === 'chy' || d.kind === 'em63'
+  const hadPassword = !!machine && (machine.has_view_password || machine.has_control_password)
+  const retarget = retargets(d, orig) && hadPassword
+  const keepHint = (has: boolean | undefined) => (has && !retarget ? 'deixe em branco para manter' : '')
 
   const submit = async (ev: FormEvent) => {
     ev.preventDefault()
@@ -256,11 +277,11 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
     }
   }
 
-  const text = (k: keyof Draft, label: string, extra: { hint?: string; placeholder?: string; list?: string; inputMode?: 'numeric'; type?: string } = {}) => (
+  const text = (k: keyof Draft, label: string, extra: { hint?: string; placeholder?: string; list?: string; inputMode?: 'numeric'; type?: string; disabled?: boolean } = {}) => (
     <label className="field">
       {label}
       <input
-        type={extra.type ?? 'text'} inputMode={extra.inputMode} list={extra.list}
+        type={extra.type ?? 'text'} inputMode={extra.inputMode} list={extra.list} disabled={extra.disabled}
         value={d[k] as string} placeholder={extra.placeholder}
         autoComplete={extra.type === 'password' ? 'new-password' : 'off'}
         aria-invalid={err(k) ? true : undefined}
@@ -311,17 +332,32 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
         <fieldset className="form-group">
           <legend>Tela ao vivo (VNC)</legend>
           <label className="check"><input type="checkbox" checked={d.vnc_enabled} onChange={(e) => set('vnc_enabled', e.target.checked)} />Mostrar a tela da máquina no monitor</label>
+          {retarget && (
+            <p className="retarget-hint" role="status"><AlertTriangle size={14} aria-hidden="true" /> Ao trocar o IP ou a porta, digite as senhas de novo.</p>
+          )}
           {d.vnc_enabled && (
             <div className="form-grid">
               {text('vnc_port', 'Porta VNC', { inputMode: 'numeric' })}
-              {text('vnc_view_password', 'Senha de visualização', {
-                type: 'password', placeholder: machine?.has_view_password ? 'deixe em branco para manter' : '',
-                hint: 'Só assistir a tela.',
-              })}
-              {text('vnc_control_password', 'Senha de operação', {
-                type: 'password', placeholder: machine?.has_control_password ? 'deixe em branco para manter' : '',
-                hint: 'Opcional. Quem a digitar pode assumir o controle da tela.',
-              })}
+              <div className="stack-tight">
+                {text('vnc_view_password', 'Senha de visualização', {
+                  type: 'password', placeholder: keepHint(machine?.has_view_password),
+                  hint: 'Só assistir a tela.', disabled: d.clear_view && !retarget,
+                })}
+                {machine?.has_view_password && !retarget && (
+                  <label className="check"><input type="checkbox" checked={d.clear_view}
+                    onChange={(e) => setD((x) => ({ ...x, clear_view: e.target.checked, vnc_view_password: '' }))} />Remover senha de visualização</label>
+                )}
+              </div>
+              <div className="stack-tight">
+                {text('vnc_control_password', 'Senha de operação', {
+                  type: 'password', placeholder: keepHint(machine?.has_control_password),
+                  hint: 'Opcional. Quem a digitar pode assumir o controle da tela.', disabled: d.clear_control && !retarget,
+                })}
+                {machine?.has_control_password && !retarget && (
+                  <label className="check"><input type="checkbox" checked={d.clear_control}
+                    onChange={(e) => setD((x) => ({ ...x, clear_control: e.target.checked, vnc_control_password: '' }))} />Remover senha de operação</label>
+                )}
+              </div>
             </div>
           )}
         </fieldset>

@@ -393,6 +393,8 @@ select, textarea, .field input:not([type='checkbox']) {
 .field input[aria-invalid='true'] { border-color: var(--critical); }
 .field-error { color: var(--critical-ink); }
 .field-hint { color: var(--ink-3); }
+.stack-tight { display: grid; gap: 6px; min-width: 0; align-content: start; }
+.retarget-hint { display: flex; gap: 6px; align-items: center; margin: 0; font-size: 13px; color: var(--ink-2); }
 textarea { resize: vertical; }
 
 .machines-layout { display: grid; gap: 16px; align-items: start; grid-template-columns: minmax(0, 1fr); }

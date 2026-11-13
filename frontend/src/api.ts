@@ -55,10 +55,16 @@ export interface Machine {
   status?: MachineStatus
 }
 
-/** Campos enviados ao cadastrar/editar; senha em branco = não enviar (o servidor mantém a atual). */
-export type MachineInput = Partial<Omit<Machine, 'id' | 'status' | 'has_view_password' | 'has_control_password' | 'profile' | 'opcua_url'>> & {
+/**
+ * Campos enviados ao cadastrar/editar; senha em branco = não enviar (o servidor mantém a atual).
+ * clear_* apaga a senha guardada. vnc_enabled null = padrão do tipo.
+ */
+export type MachineInput = Partial<Omit<Machine, 'id' | 'status' | 'has_view_password' | 'has_control_password' | 'profile' | 'opcua_url' | 'vnc_enabled'>> & {
+  vnc_enabled?: boolean | null
   vnc_view_password?: string
   vnc_control_password?: string
+  clear_vnc_view_password?: boolean
+  clear_vnc_control_password?: boolean
 }
 
 export interface MachineList {
@@ -195,7 +201,7 @@ export function usePoll<T>(url: string | null, everyMs = 30000) {
     const id = window.setInterval(load, everyMs)
     return () => window.clearInterval(id)
   }, [load, everyMs])
-  return { data, error, reload: load }
+  return { data, error, reload: load, set: setData }
 }
 
 /** Valores ao vivo pelo WebSocket; se ele cair, tenta de novo e usa /api/live enquanto isso. */
@@ -203,6 +209,7 @@ export function useLive() {
   const [live, setLive] = useState<Live | null>(null)
   const [linked, setLinked] = useState(false)
   const [change, setChange] = useState<{ id: number; seq: number } | null>(null)
+  const [openSeq, setOpenSeq] = useState(0)
   const retry = useRef<number | undefined>(undefined)
 
   useEffect(() => {
@@ -223,6 +230,7 @@ export function useLive() {
       socket = new WebSocket(`${proto}://${window.location.host}/ws`)
       socket.onopen = () => {
         setLinked(true)
+        setOpenSeq((n) => n + 1)
         window.clearInterval(poll)
       }
       let changed = false
@@ -255,7 +263,8 @@ export function useLive() {
     }
   }, [])
 
-  return { live, linked, changedTo: change?.id ?? null, changeSeq: change?.seq ?? 0 }
+  /** openSeq conta as aberturas do /ws: a partir da 2ª, é uma reconexão. */
+  return { live, linked, changedTo: change?.id ?? null, changeSeq: change?.seq ?? 0, openSeq }
 }
 
 export function num(v: number | string | null | undefined): number | null {
