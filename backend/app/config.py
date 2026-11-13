@@ -64,6 +64,11 @@ class Settings:
     vnc_tcp_port: int = int(os.getenv("VNC_TCP_PORT", "5901"))
     vnc_tcp_bind: str = os.getenv("VNC_TCP_BIND", "0.0.0.0")
     vnc_audit_path: str | None = _path(os.getenv("VNC_AUDIT_PATH", "data/vnc_audit.log"))
+    # Cadastro de maquinas (SQLite) e historico/cache de tags por maquina
+    config_db_path: str = _path(os.getenv("CONFIG_DB_PATH", "data/monitor_config.db"))
+    machines_dir: str = _path(os.getenv("MACHINES_DIR", "data/machines"))
+    # AMS Net ID local do servidor (rota ADS); vazio = nao configurado
+    ads_local_net_id: str = os.getenv("ADS_LOCAL_NET_ID", "")
     frontend_dist: str = _path(os.getenv("FRONTEND_DIST", "frontend/dist"))
 
 
