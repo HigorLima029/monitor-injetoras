@@ -15,7 +15,7 @@ APP_DIR = Path(__file__).resolve().parents[1] / "app"
 
 def test_codigo_nao_escreve_na_maquina():
     """Garantia de segurança: nenhuma chamada de escrita OPC-UA no código."""
-    pattern = re.compile(r"write_value|set_value|write_attribute|write_params|set_attribute")
+    pattern = re.compile(r"write_value|set_value|write_attribute|write_params|set_attribute|write_by_name|write_control|plc\.write\(")
     for py in APP_DIR.glob("*.py"):
         assert not pattern.search(py.read_text(encoding="utf-8")), py.name
 

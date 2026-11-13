@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import re
 
+from .ads_source import ADS_ALARMS
+
 # (tag, rótulo, unidade, grupo)
 KPI_TAGS: list[tuple[str, str, str, str]] = [
     ("DeviceOnOff", "Máquina ligada", "", "estado"),
@@ -137,6 +139,12 @@ def humanize(tag: str) -> str:
 
 
 def alarm_label(tag: str) -> str:
+    if tag.startswith("WarnAds"):  # painéis Beckhoff: WarnAds<ID>
+        try:
+            alarm_id = int(tag[len("WarnAds"):])
+        except ValueError:
+            return humanize(tag)
+        return ADS_ALARMS.get(alarm_id, f"Alarme Beckhoff {alarm_id}")
     return ALARM_LABELS.get(tag, humanize(tag))
 
 
