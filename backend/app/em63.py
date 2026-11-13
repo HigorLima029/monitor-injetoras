@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from asyncua import Client, ua
 
+from .sources import close_client
+
 NS_URI = "urn:B&R/pv/"
 PREFIX = "::EM63Mapp:"
 
@@ -142,12 +144,9 @@ class Em63Source:
         self._nodes = {}
 
     async def close(self) -> None:
-        if self._client is not None:
-            try:
-                await self._client.disconnect()
-            except Exception:
-                pass
-        self._client = None
+        client, self._client = self._client, None
+        if client is not None:
+            await close_client(client)
 
     async def _browse_fields(self) -> list[str]:
         assert self._client is not None

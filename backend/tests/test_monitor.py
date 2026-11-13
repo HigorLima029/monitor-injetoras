@@ -194,3 +194,40 @@ def test_leitura_travada_vira_sem_conexao_e_reconecta():
         await col.stop()
 
     asyncio.run(run())
+
+
+class _SlowClient:
+    """Client OPC-UA falso cujo disconnect() trava (gateway em 4G meio caído)."""
+
+    def __init__(self):
+        self.socket_closed = 0
+
+    async def disconnect(self):
+        await asyncio.sleep(30)
+
+    def disconnect_socket(self):
+        self.socket_closed += 1
+
+
+@pytest.mark.parametrize("make", [
+    lambda: OpcUaSource("opc.tcp://127.0.0.1:1", 1),
+    lambda: __import__("app.em63", fromlist=["Em63Source"]).Em63Source("opc.tcp://127.0.0.1:1"),
+])
+def test_close_lento_fecha_o_socket(monkeypatch, make):
+    import app.sources as sources_mod
+
+    async def run():
+        monkeypatch.setattr(sources_mod, "DISCONNECT_TIMEOUT", 0.1)
+        src = make()
+        cli = src._client = _SlowClient()
+        t0 = time.monotonic()
+        await src.close()
+        assert time.monotonic() - t0 < 1 and cli.socket_closed == 1 and src._client is None
+        # cancelado de fora (limite do gerenciador) antes do limite interno: o socket fecha igual
+        monkeypatch.setattr(sources_mod, "DISCONNECT_TIMEOUT", 4)
+        cli = src._client = _SlowClient()
+        with pytest.raises(asyncio.TimeoutError):
+            await asyncio.wait_for(src.close(), 0.1)
+        assert cli.socket_closed == 1 and src._client is None
+
+    asyncio.run(run())

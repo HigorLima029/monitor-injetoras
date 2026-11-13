@@ -5,6 +5,8 @@ OPC-UA e não deve existir (o teste test_codigo_nao_escreve_na_maquina garante).
 """
 from __future__ import annotations
 
+import asyncio
+import contextlib
 import json
 import math
 import random
@@ -17,6 +19,22 @@ from asyncua import Client, ua
 from .tags import ALARM_PREFIX, BARREL_ZONES
 
 RECIPE_FILE = Path(__file__).with_name("demo_recipe.json")
+# Limite do disconnect() educado; o gerenciador espera um pouco mais (CLOSE_TIMEOUT = 5 s).
+DISCONNECT_TIMEOUT = 4.0
+
+
+async def close_client(client: Client) -> None:
+    """Desconecta com limite de tempo e SEMPRE fecha o socket, mesmo se cancelado no meio.
+
+    Em 4G o disconnect() pode travar; sem o disconnect_socket() o socket ficaria aberto.
+    """
+    try:
+        await asyncio.wait_for(client.disconnect(), DISCONNECT_TIMEOUT)
+    except Exception:
+        pass
+    finally:
+        with contextlib.suppress(Exception):
+            client.disconnect_socket()
 
 
 class Source(Protocol):
@@ -47,12 +65,9 @@ class OpcUaSource:
         self._nodes = {}
 
     async def close(self) -> None:
-        if self._client is not None:
-            try:
-                await self._client.disconnect()
-            except Exception:
-                pass
-        self._client = None
+        client, self._client = self._client, None
+        if client is not None:
+            await close_client(client)
 
     async def list_tags(self) -> list[str]:
         if self._tags:
