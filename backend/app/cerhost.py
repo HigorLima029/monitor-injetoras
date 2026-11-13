@@ -88,18 +88,32 @@ def _write_xauthority(path: Path, display: int, cookie: bytes) -> None:
         fh.write(data)
 
 
-def _die_with_parent() -> None:
-    """No filho, antes do exec: recebe SIGTERM se o Monitor morrer (Linux; senao nao faz nada)."""
+def _resolve_prctl():
+    """Resolve o prctl uma vez, no processo pai (no filho, entre fork e exec, so chamamos)."""
     if not sys.platform.startswith("linux"):
-        return
+        return None
     try:
         import ctypes
-        libc = ctypes.CDLL(None, use_errno=True)
-        libc.prctl(1, int(signal.SIGTERM), 0, 0, 0)  # PR_SET_PDEATHSIG
-        if os.getppid() == 1:  # o Monitor ja morreu entre o fork e o prctl
-            os.kill(os.getpid(), signal.SIGTERM)
-    except Exception:  # nunca impede o processo de subir
-        pass
+        return ctypes.CDLL(None, use_errno=True).prctl
+    except Exception:  # sem prctl: o processo sobe sem o aviso de morte do pai
+        return None
+
+
+_PRCTL = _resolve_prctl()
+
+
+def _die_with_parent_for(parent_pid: int):
+    """preexec_fn: recebe SIGTERM se o Monitor morrer. So chama funcoes ja resolvidas."""
+    def _preexec() -> None:
+        if _PRCTL is None:
+            return
+        try:
+            _PRCTL(1, int(signal.SIGTERM), 0, 0, 0)  # PR_SET_PDEATHSIG
+            if os.getppid() != parent_pid:  # o Monitor ja morreu entre o fork e o prctl
+                os.kill(os.getpid(), signal.SIGTERM)
+        except Exception:  # nunca impede o processo de subir
+            pass
+    return _preexec
 
 
 class SubprocessRunner:
@@ -113,7 +127,7 @@ class SubprocessRunner:
                 *argv, env=env, stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=err if err is not None else asyncio.subprocess.DEVNULL,
-                start_new_session=True, preexec_fn=_die_with_parent)
+                start_new_session=True, preexec_fn=_die_with_parent_for(os.getpid()))
         finally:
             if err is not None:
                 err.close()
@@ -196,6 +210,7 @@ class CerhostBridge:
         self.error: str | None = None
         self.port: int | None = None
         self._procs: dict[str, object] = {}
+        self.pgid_of = os.getpgid  # trocado nos testes
         self._task: asyncio.Task | None = None
         self._lock: asyncio.Lock | None = None
         self._tmpdir: str | None = None
@@ -432,7 +447,7 @@ class CerhostBridge:
                 ok = active == main_wid and main_name == MAIN_TITLE and active_name == MAIN_TITLE
             else:
                 rc, pid = await self._cmd(["xdotool", "getwindowpid", active])
-                ok = (active != main_wid and rc == 0 and pid.strip() == str(proc.pid)
+                ok = (active != main_wid and rc == 0 and self._owned(pid)
                       and active_name is not None and active_name not in IGNORED_TITLES)
             if ok:
                 return True
@@ -474,13 +489,30 @@ class CerhostBridge:
     async def _wm_ready(self) -> bool:
         return self._alive("openbox") and (await self._cmd(["wmctrl", "-m"]))[0] == 0
 
+    def _owned(self, pid_text: str) -> bool:
+        """A janela e do CERHost? O wine desenha pelo processo filho (wine-preloader), entao
+        vale qualquer processo do grupo do CERHost (cada ponte abre o seu grupo)."""
+        proc = self._procs.get("cerhost")
+        if proc is None:
+            return False
+        try:
+            pid = int(pid_text.strip())
+        except ValueError:
+            return False
+        if pid == proc.pid:
+            return True
+        try:
+            return self.pgid_of(pid) == proc.pid
+        except (ProcessLookupError, PermissionError, OSError):
+            return False
+
     async def _cerhost_windows(self) -> dict[str, str] | None:
         """Janelas do processo do CERHost (id -> titulo); None = nao deu para saber."""
         proc = self._procs.get("cerhost")
         if proc is None or proc.returncode is not None:
             return {}
-        rc, out = await self._cmd(["xdotool", "search", "--all", "--pid", str(proc.pid),
-                                   "--name", "."])
+        # a tela virtual e so nossa; filtra pelo grupo do processo do CERHost
+        rc, out = await self._cmd(["xdotool", "search", "--name", "."])
         if rc != 0:
             # 1 sem saida = nenhuma janela; qualquer outra coisa (estouro, tela fora) = nao sei
             if rc == 1 and not out.strip() and await self._display_ready():
@@ -488,6 +520,9 @@ class CerhostBridge:
             return None
         titles = {}
         for wid in out.split():
+            rc, pid = await self._cmd(["xdotool", "getwindowpid", wid])
+            if rc != 0 or not self._owned(pid):
+                continue  # janela sem dono conhecido (ex.: do openbox) ou de outro processo
             rc, name = await self._cmd(["xdotool", "getwindowname", wid])
             if rc != 0:
                 return None
@@ -627,11 +662,15 @@ class CerhostBridge:
         if name == "x11vnc":
             return exe == "x11vnc" and "-display" in argv and argv[argv.index("-display") + 1:][:1] == [d]
         if name == "cerhost":
-            return any("cerhost" in os.path.basename(a.replace("\\", "/")).lower() for a in argv)
+            # so o proprio CERHOST.exe (nome exato), nunca um arquivo que so contenha "cerhost"
+            alvo = {"cerhost.exe", os.path.basename(self.cerhost_exe.replace("\\", "/")).lower()}
+            return any(os.path.basename(a.replace("\\", "/")).lower() in alvo for a in argv)
         return False
 
     @staticmethod
     def _kill(pid: int, sig: int) -> None:
+        if pid == os.getpid() or os.getpgid(0) == pid:
+            return  # nunca o proprio Monitor nem o grupo dele
         try:
             if os.getpgid(pid) == pid:
                 os.killpg(pid, sig)  # era lider do grupo: leva os filhos junto

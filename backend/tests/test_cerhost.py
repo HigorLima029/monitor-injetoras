@@ -108,17 +108,18 @@ class FakeRunner:
         if argv[:2] == ["xdotool", "search"]:
             if self.search_rc is not None:
                 return self.search_rc, ""
-            pid = argv[argv.index("--pid") + 1]
-            if wine is None or pid != str(wine.pid) or not self.windows:
+            todas = {**(self.windows if wine is not None else {}), **self.foreign}
+            if not todas:
                 return 1, ""
-            return 0, "".join(f"{w}\n" for w in self.windows)
+            return 0, "".join(f"{w}\n" for w in todas)
         if argv[:2] == ["xdotool", "getwindowname"]:
             return 0, {**self.windows, **self.foreign}.get(argv[2], "") + "\n"
         if argv[:2] == ["xdotool", "getactivewindow"]:
             return 0, (self.active or self._focus) + "\n"
         if argv[:2] == ["xdotool", "getwindowpid"]:
             if argv[2] in self.windows and wine is not None:
-                return 0, f"{wine.pid}\n"
+                # como no Wine de verdade: quem desenha e o filho (wine-preloader), nao o wine
+                return 0, f"{wine.pid + 1}\n"
             return 0, "1\n"
         if argv == ["xdotool", "key", "alt+f"]:
             self._menu = True
@@ -166,6 +167,13 @@ def make_bridge(tmp_path, monkeypatch, control=CONTROL, runner=None, **kw):
     b.key_delay = 0
     b.ready_timeout = b.window_timeout = b.connect_timeout = 0.2
     b.kill_timeout = 0.05
+
+    def pgid_of(pid):  # o filho do wine (pid + 1) fica no grupo do wine; o resto, no proprio
+        for p in runner.procs("wine"):
+            if pid in (p.pid, p.pid + 1):
+                return p.pid
+        return pid
+    b.pgid_of = pgid_of
     for k, v in kw.items():
         setattr(b, k, v)
     return b, runner
@@ -219,7 +227,7 @@ def test_sequencia_de_conexao(tmp_path, monkeypatch):
             assert ["wmctrl", "-r", PANEL, "-b", "add,maximized_vert,maximized_horz"] in runner.commands
             # janelas so do processo do CERHost
             searches = [c for c in runner.commands if c[:2] == ["xdotool", "search"]]
-            assert searches and all(c[c.index("--pid") + 1] == str(wine.pid) for c in searches)
+            assert searches  # janelas filtradas pelo grupo do processo do CERHost (pgid_of)
             assert [p.argv[0] for p in runner.spawned] == ["Xvfb", "openbox", "wine", "x11vnc"]
             for env in runner.envs + runner.run_envs:
                 assert env["DISPLAY"] == ":99" and env["WINEARCH"] == "win32"
@@ -1056,3 +1064,37 @@ def test_stop_cancelado_repassa_o_cancelamento(tmp_path, monkeypatch):
 
     assert asyncio.run(go()) is True
     assert alive(runner) == []
+
+
+def test_sobra_so_reconhece_o_proprio_cerhost(tmp_path, monkeypatch):
+    b, _ = make_bridge(tmp_path, monkeypatch)
+    assert b._is_ours("cerhost", ["C:\\windows\\system32\\wine-preloader", "Z:\\x\\CERHOST.exe"])
+    assert b._is_ours("cerhost", ["wine", str(tmp_path / "CERHOST.exe")])
+    # arquivos que so contem "cerhost" no nome nunca sao confundidos com o CERHost
+    for argv in (["python", "-m", "pytest", "tests/test_cerhost.py"], ["vim", "app/cerhost.py"],
+                 ["less", "cerhost.log"]):
+        assert not b._is_ours("cerhost", argv)
+
+
+def test_nunca_mata_o_proprio_monitor(monkeypatch):
+    mortos = []
+    monkeypatch.setattr(cerhost.os, "killpg", lambda pid, sig: mortos.append(("pg", pid)))
+    monkeypatch.setattr(cerhost.os, "kill", lambda pid, sig: mortos.append(("p", pid)))
+    CerhostBridge._kill(os.getpid(), signal.SIGTERM)
+    CerhostBridge._kill(os.getpgid(0), signal.SIGTERM)
+    assert mortos == []
+
+
+def test_janela_do_filho_do_wine_conta(tmp_path, monkeypatch):
+    """No Wine de verdade a janela tem o pid do wine-preloader (filho), nao do wine."""
+    b, runner = make_bridge(tmp_path, monkeypatch)
+
+    async def go():
+        await b.start()
+        try:
+            assert b.state == "connected"
+            wine = runner.procs("wine")[0]
+            assert b._owned(str(wine.pid + 1)) and not b._owned("1")
+        finally:
+            await b.stop()
+    asyncio.run(go())
