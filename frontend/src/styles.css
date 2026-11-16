@@ -443,9 +443,10 @@ textarea { resize: vertical; }
 .vnc-quadro.cheia .vnc-screen { height: calc(100vh - 110px); }
 .vnc-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .panel-keys { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.panel-keys.cinco { grid-template-columns: repeat(5, minmax(0, 1fr)); }
 .panel-key { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 112px; padding: 6px 10px; }
 .panel-key kbd { font-size: 11px; color: var(--ink-2); font-family: inherit; }
 @media (max-width: 720px) {
-  .panel-keys { grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+  .panel-keys, .panel-keys.cinco { grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
   .panel-key { min-width: 0; }
 }
