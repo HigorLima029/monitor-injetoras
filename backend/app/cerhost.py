@@ -211,6 +211,7 @@ class CerhostBridge:
         self.port: int | None = None
         self._procs: dict[str, object] = {}
         self.pgid_of = os.getpgid  # trocado nos testes
+        self._vnc_clip: str | None = None
         self._task: asyncio.Task | None = None
         self._lock: asyncio.Lock | None = None
         self._tmpdir: str | None = None
@@ -340,8 +341,14 @@ class CerhostBridge:
                 # o robo digita com o VNC desligado: ninguem assiste nem opera no meio
                 await self._stop_procs(("x11vnc",))
                 await self._connect()
+                windows = await self._cerhost_windows() or {}
+            # transmite so o recorte da janela do CERHost (sem a area preta da tela virtual)
+            clip = await self._clip(windows)
+            if clip is not None and clip != self._vnc_clip and self._alive("x11vnc"):
+                log.info("a janela do CERHost mudou de tamanho; ajustando o recorte da tela")
+                await self._stop_procs(("x11vnc",))
             if not self._alive("x11vnc"):
-                await self._start_vnc()
+                await self._start_vnc(clip)
             if self.state != "connected":
                 log.info("tela da Beckhoff pronta em 127.0.0.1:%s", self.port)
             self.state, self.error = "connected", None
@@ -459,7 +466,25 @@ class CerhostBridge:
         rc, name = await self._cmd(["xdotool", "getwindowname", wid])
         return name.rstrip("\r\n") if rc == 0 else None
 
-    async def _start_vnc(self) -> None:
+    async def _clip(self, windows: dict[str, str]) -> str | None:
+        """Recorte 'LxA+X+Y' da janela conectada do CERHost; None = tela inteira."""
+        title = self._connected_title(windows)
+        wid = next((w for w, t in windows.items() if t == title), None) if title else None
+        if wid is None:
+            return None
+        rc, out = await self._cmd(["xdotool", "getwindowgeometry", "--shell", wid])
+        if rc != 0:
+            return None
+        geo = dict(line.split("=", 1) for line in out.split() if "=" in line)
+        try:
+            x, y, w, h = (int(geo[k]) for k in ("X", "Y", "WIDTH", "HEIGHT"))
+        except (KeyError, ValueError):
+            return None
+        if w < 50 or h < 50:
+            return None
+        return f"{w}x{h}+{max(x, 0)}+{max(y, 0)}"
+
+    async def _start_vnc(self, clip: str | None = None) -> None:
         path = Path(self._tmpdir) / "senhas"
         with contextlib.suppress(FileNotFoundError):
             path.unlink()
@@ -474,8 +499,11 @@ class CerhostBridge:
                 "-forever", "-shared", "-quiet", "-passwdfile", f"rm:{path}"]
         if not self.control_password:
             argv.append("-viewonly")
+        if clip:
+            argv += ["-clip", clip]
         await self._spawn("x11vnc", argv)
         self.port = self._last_port = port
+        self._vnc_clip = clip
 
     # ------------------------------------------------------------------ consultas
     async def _cmd(self, argv: list[str]) -> tuple[int, str]:

@@ -63,6 +63,7 @@ class FakeRunner:
         self.spawn_delay: dict[str, float] = {}
         self.stderr_paths: dict[str, str | None] = {}
         self.dialog_takes_focus = True
+        self.geometry: str | None = "600x880+1+20"  # janela do painel conectada
         self._typed = False
         self._menu = False
         self._focus = MAIN_WID
@@ -114,6 +115,12 @@ class FakeRunner:
             return 0, "".join(f"{w}\n" for w in todas)
         if argv[:2] == ["xdotool", "getwindowname"]:
             return 0, {**self.windows, **self.foreign}.get(argv[2], "") + "\n"
+        if argv[:3] == ["xdotool", "getwindowgeometry", "--shell"]:
+            if self.geometry is None or self.windows.get(argv[3]) != PANEL:
+                return 1, ""
+            wh, x, y = self.geometry.split("+")
+            w, h = wh.split("x")
+            return 0, f"WINDOW={argv[3]}\nX={x}\nY={y}\nWIDTH={w}\nHEIGHT={h}\nSCREEN=0\n"
         if argv[:2] == ["xdotool", "getactivewindow"]:
             return 0, (self.active or self._focus) + "\n"
         if argv[:2] == ["xdotool", "getwindowpid"]:
@@ -1095,6 +1102,32 @@ def test_janela_do_filho_do_wine_conta(tmp_path, monkeypatch):
             assert b.state == "connected"
             wine = runner.procs("wine")[0]
             assert b._owned(str(wine.pid + 1)) and not b._owned("1")
+        finally:
+            await b.stop()
+    asyncio.run(go())
+
+
+def test_vnc_transmite_so_a_janela_do_cerhost(tmp_path, monkeypatch):
+    """Sem a area preta da tela virtual: o x11vnc recorta a janela do painel."""
+    b, runner = make_bridge(tmp_path, monkeypatch)
+
+    async def go():
+        await b.start()
+        try:
+            assert b.state == "connected"
+            vnc = runner.procs("x11vnc")[-1].argv
+            assert vnc[vnc.index("-clip") + 1] == "600x880+1+20"
+            # a janela mudou de tamanho: o recorte acompanha (x11vnc de novo, mesma porta)
+            porta = b.port
+            runner.geometry = "600x900+1+20"
+            await b.check()
+            vnc = runner.procs("x11vnc")[-1].argv
+            assert vnc[vnc.index("-clip") + 1] == "600x900+1+20" and b.port == porta
+            # sem medida da janela: mantem o recorte que ja estava (nao fica trocando)
+            n = len(runner.procs("x11vnc"))
+            runner.geometry = None
+            await b.check()
+            assert len(runner.procs("x11vnc")) == n
         finally:
             await b.stop()
     asyncio.run(go())
