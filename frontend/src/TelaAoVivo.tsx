@@ -15,16 +15,36 @@ function novoSid(): string {
 /** Motivo do último fechamento pelo servidor (ex.: "máquina trocada"), para a tela nova da próxima máquina. */
 let fechadaPor: { motivo: string; quando: number } | null = null
 
+/** Botão de tecla do painel: manda a tecla (com Ctrl, se pedir) direto pelo VNC. */
+type TeclaPainel = { nome: string; rotulo: string; keysym: number; code: string; ctrl?: boolean }
+
 /**
- * Teclas físicas do painel Beckhoff (XMold): no CERHost cada uma é Ctrl + letra.
+ * Beckhoff (XMold): cada tecla física de função é Ctrl + letra no CERHost.
  * Mesma ordem do teclado do painel: 1ª fileira Ctrl+Q..R, 2ª fileira Ctrl+A..F.
  */
-const TECLAS_BECKHOFF: { letra: string; nome: string }[] = [
-  { letra: 'q', nome: 'Visão geral' }, { letra: 'w', nome: 'Molde' },
-  { letra: 'e', nome: 'Injeção' }, { letra: 'r', nome: 'Temperatura' },
-  { letra: 'a', nome: 'Extrator' }, { letra: 's', nome: 'Núcleo' },
-  { letra: 'd', nome: 'Dosagem' }, { letra: 'f', nome: 'Ajustes' },
+const TECLAS_BECKHOFF: TeclaPainel[] = [
+  ['q', 'Visão geral'], ['w', 'Molde'], ['e', 'Injeção'], ['r', 'Temperatura'],
+  ['a', 'Extrator'], ['s', 'Núcleo'], ['d', 'Dosagem'], ['f', 'Ajustes'],
+].map(([l, nome]) => ({ nome, rotulo: `Ctrl+${l.toUpperCase()}`, keysym: l.charCodeAt(0), code: `Key${l.toUpperCase()}`, ctrl: true }))
+
+/**
+ * B&R (Chen Hsong): pelo VNC o painel só aceita F1–F10, Home e PgUp (além de números, setas e Enter).
+ * F1–F6 são as abas acima das teclas. F7 desliga o VNC e F8 não faz nada: ficam de fora.
+ */
+const F = (n: number) => ({ keysym: 0xffbe + n - 1, code: `F${n}`, rotulo: `F${n}` })
+const TECLAS_BR: TeclaPainel[] = [
+  { nome: 'Aba 1', ...F(1) }, { nome: 'Aba 2', ...F(2) }, { nome: 'Aba 3', ...F(3) },
+  { nome: 'Aba 4', ...F(4) }, { nome: 'Aba 5', ...F(5) }, { nome: 'Aba 6', ...F(6) },
+  { nome: 'Controle', ...F(9) }, { nome: 'Voltar', ...F(10) },
+  { nome: 'Visão geral', rotulo: 'Home', keysym: 0xff50, code: 'Home' },
+  { nome: 'Configurações', rotulo: 'PgUp', keysym: 0xff55, code: 'PageUp' },
 ]
+
+function teclasDo(kind?: string): TeclaPainel[] {
+  if (kind === 'ads') return TECLAS_BECKHOFF
+  if (kind === 'em63') return TECLAS_BR
+  return []
+}
 const XK_CONTROL_L = 0xffe3
 
 type TecladoNavegador = { lock?: (teclas?: string[]) => Promise<void>; unlock?: () => void }
@@ -125,17 +145,17 @@ export function TelaAoVivo({ machineName, kind }: { machineName?: string; kind?:
     if (operando) rfb.current.focus()
   }, [operando])
 
-  /** Manda Ctrl + letra direto para o painel (não passa pelo teclado do navegador). */
-  const teclaPainel = (letra: string) => {
+  /** Manda a tecla direto para o painel (não passa pelo teclado do navegador). */
+  const teclaPainel = (t: TeclaPainel) => {
     const r = rfb.current
     if (!r || !operando) return
-    const code = `Key${letra.toUpperCase()}`
-    r.sendKey(XK_CONTROL_L, 'ControlLeft', true)
-    r.sendKey(letra.charCodeAt(0), code, true)
-    r.sendKey(letra.charCodeAt(0), code, false)
-    r.sendKey(XK_CONTROL_L, 'ControlLeft', false)
+    if (t.ctrl) r.sendKey(XK_CONTROL_L, 'ControlLeft', true)
+    r.sendKey(t.keysym, t.code, true)
+    r.sendKey(t.keysym, t.code, false)
+    if (t.ctrl) r.sendKey(XK_CONTROL_L, 'ControlLeft', false)
     r.focus()
   }
+  const teclas = teclasDo(kind)
 
   // Tela cheia + trava de teclado (Chrome/Edge): aí até Ctrl+W vai para o painel. Segure Esc para sair.
   const alternarTelaCheia = async () => {
@@ -289,13 +309,13 @@ export function TelaAoVivo({ machineName, kind }: { machineName?: string; kind?:
 
       <div ref={quadro} className={`vnc-quadro${telaCheia ? ' cheia' : ''}`}>
       <div className="vnc-tools">
-        {kind === 'ads' && (
-          <div className="panel-keys" role="group" aria-label="Teclas do painel">
-            {TECLAS_BECKHOFF.map((t) => (
-              <button key={t.letra} className="btn panel-key" disabled={!operando}
-                title={operando ? `Ctrl+${t.letra.toUpperCase()} no painel` : 'Assuma o controle para usar as teclas do painel'}
-                onClick={() => teclaPainel(t.letra)}>
-                <span>{t.nome}</span><kbd>Ctrl+{t.letra.toUpperCase()}</kbd>
+        {teclas.length > 0 && (
+          <div className={`panel-keys${teclas.length > 8 ? ' cinco' : ''}`} role="group" aria-label="Teclas do painel">
+            {teclas.map((t) => (
+              <button key={t.code} className="btn panel-key" disabled={!operando}
+                title={operando ? `${t.rotulo} no painel` : 'Assuma o controle para usar as teclas do painel'}
+                onClick={() => teclaPainel(t)}>
+                <span>{t.nome}</span><kbd>{t.rotulo}</kbd>
               </button>
             ))}
           </div>
