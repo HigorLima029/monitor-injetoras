@@ -1,5 +1,5 @@
 import RFB from '@novnc/novnc/lib/rfb'
-import { Eye, Hand, KeyRound, LockOpen, RefreshCw, Users } from 'lucide-react'
+import { Expand, Eye, Hand, KeyRound, LockOpen, RefreshCw, Shrink, Users } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { getJson, type VncStatus } from './api'
 
@@ -15,6 +15,23 @@ function novoSid(): string {
 /** Motivo do último fechamento pelo servidor (ex.: "máquina trocada"), para a tela nova da próxima máquina. */
 let fechadaPor: { motivo: string; quando: number } | null = null
 
+/**
+ * Teclas físicas do painel Beckhoff (XMold): no CERHost cada uma é Ctrl + letra.
+ * Mesma ordem do teclado do painel: 1ª fileira Ctrl+Q..R, 2ª fileira Ctrl+A..F.
+ */
+const TECLAS_BECKHOFF: { letra: string; nome: string }[] = [
+  { letra: 'q', nome: 'Visão geral' }, { letra: 'w', nome: 'Molde' },
+  { letra: 'e', nome: 'Injeção' }, { letra: 'r', nome: 'Temperatura' },
+  { letra: 'a', nome: 'Extrator' }, { letra: 's', nome: 'Núcleo' },
+  { letra: 'd', nome: 'Dosagem' }, { letra: 'f', nome: 'Ajustes' },
+]
+const XK_CONTROL_L = 0xffe3
+
+type TecladoNavegador = { lock?: (teclas?: string[]) => Promise<void>; unlock?: () => void }
+function teclado(): TecladoNavegador | undefined {
+  return (navigator as Navigator & { keyboard?: TecladoNavegador }).keyboard
+}
+
 function mmss(segundos: number): string {
   const s = Math.max(0, Math.round(segundos))
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
@@ -25,8 +42,11 @@ function mmss(segundos: number): string {
  * A senha digitada define o papel: a de visualização só assiste; a de operação pode assumir o controle.
  * O servidor só repassa toques de quem está com o controle; os de todo o resto são descartados lá.
  */
-export function TelaAoVivo({ machineName }: { machineName?: string }) {
+export function TelaAoVivo({ machineName, kind }: { machineName?: string; kind?: string }) {
   const alvo = useRef<HTMLDivElement>(null)
+  const quadro = useRef<HTMLDivElement>(null)
+  const [telaCheia, setTelaCheia] = useState(false)
+  const [travaTeclado, setTravaTeclado] = useState(false)
   const rfb = useRef<RFB | null>(null)
   const [sid, setSid] = useState(novoSid)
   const [anterior] = useState(() => {
@@ -104,6 +124,54 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
     rfb.current.viewOnly = !operando
     if (operando) rfb.current.focus()
   }, [operando])
+
+  /** Manda Ctrl + letra direto para o painel (não passa pelo teclado do navegador). */
+  const teclaPainel = (letra: string) => {
+    const r = rfb.current
+    if (!r || !operando) return
+    const code = `Key${letra.toUpperCase()}`
+    r.sendKey(XK_CONTROL_L, 'ControlLeft', true)
+    r.sendKey(letra.charCodeAt(0), code, true)
+    r.sendKey(letra.charCodeAt(0), code, false)
+    r.sendKey(XK_CONTROL_L, 'ControlLeft', false)
+    r.focus()
+  }
+
+  // Tela cheia + trava de teclado (Chrome/Edge): aí até Ctrl+W vai para o painel. Segure Esc para sair.
+  const alternarTelaCheia = async () => {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen().catch(() => undefined)
+      return
+    }
+    try {
+      await quadro.current?.requestFullscreen()
+    } catch {
+      setAviso('O navegador não deixou abrir em tela cheia.')
+      return
+    }
+    try {
+      await teclado()?.lock?.()
+      setTravaTeclado(Boolean(teclado()?.lock))
+    } catch {
+      setTravaTeclado(false)
+    }
+    rfb.current?.focus()
+  }
+  useEffect(() => {
+    const mudou = () => {
+      const cheia = document.fullscreenElement === quadro.current && quadro.current !== null
+      setTelaCheia(cheia)
+      if (!cheia) {
+        teclado()?.unlock?.()
+        setTravaTeclado(false)
+      }
+    }
+    document.addEventListener('fullscreenchange', mudou)
+    return () => {
+      document.removeEventListener('fullscreenchange', mudou)
+      teclado()?.unlock?.()
+    }
+  }, [])
 
   const controle = async (action: 'take' | 'release') => {
     setEnviando(true)
@@ -219,6 +287,29 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
       )}
       {aviso && <div className="vnc-bar" role="alert">{aviso}</div>}
 
+      <div ref={quadro} className={`vnc-quadro${telaCheia ? ' cheia' : ''}`}>
+      <div className="vnc-tools">
+        {kind === 'ads' && (
+          <div className="panel-keys" role="group" aria-label="Teclas do painel">
+            {TECLAS_BECKHOFF.map((t) => (
+              <button key={t.letra} className="btn panel-key" disabled={!operando}
+                title={operando ? `Ctrl+${t.letra.toUpperCase()} no painel` : 'Assuma o controle para usar as teclas do painel'}
+                onClick={() => teclaPainel(t.letra)}>
+                <span>{t.nome}</span><kbd>Ctrl+{t.letra.toUpperCase()}</kbd>
+              </button>
+            ))}
+          </div>
+        )}
+        <span className="spacer" />
+        {telaCheia && (
+          <span className="muted small">
+            {travaTeclado ? 'Teclado preso no painel. Para sair, segure Esc.' : 'Para sair, aperte Esc. Neste navegador, Ctrl+W e parecidos continuam com o navegador: use os botões.'}
+          </span>
+        )}
+        <button className="btn" onClick={() => void alternarTelaCheia()}>
+          {telaCheia ? <><Shrink size={16} aria-hidden="true" /> Sair da tela cheia</> : <><Expand size={16} aria-hidden="true" /> Tela cheia</>}
+        </button>
+      </div>
       <div className={`panel vnc-panel${operando ? ' operando' : ''}`}>
         {estado === 'senha' && !ponte && (
           <form className="vnc-overlay" onSubmit={enviarSenha}>
@@ -246,6 +337,7 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
           </div>
         )}
         <div ref={alvo} className="vnc-screen" aria-label="Tela do painel" />
+      </div>
       </div>
     </div>
   )

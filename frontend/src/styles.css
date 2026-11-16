@@ -435,3 +435,17 @@ textarea { resize: vertical; }
 }
 .banner > svg { flex: none; margin-top: 2px; }
 .machine-form h3:focus { outline: none; }
+
+/* Tela ao vivo: teclas do painel e tela cheia */
+.vnc-quadro { display: flex; flex-direction: column; gap: 8px; }
+.vnc-quadro.cheia { background: var(--bg); padding: 8px; height: 100vh; }
+.vnc-quadro.cheia .vnc-panel { flex: 1; min-height: 0; }
+.vnc-quadro.cheia .vnc-screen { height: calc(100vh - 110px); }
+.vnc-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.panel-keys { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.panel-key { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; min-width: 112px; padding: 6px 10px; }
+.panel-key kbd { font-size: 11px; color: var(--ink-2); font-family: inherit; }
+@media (max-width: 720px) {
+  .panel-keys { grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+  .panel-key { min-width: 0; }
+}
