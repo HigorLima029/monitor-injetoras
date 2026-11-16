@@ -293,10 +293,18 @@ class Session:
 
 # ------------------------------------------------------------------ hub
 class VncHub:
+    retry_delay = 3.0  # espera entre tentativas de ligar no painel (os testes encurtam)
+
     def __init__(self, host: str, port: int, view_password: str, control_password: str = "",
                  control_timeout: float = 300, name: str = "Painel", audit_path: str | None = None,
-                 idle_grace: float = 20, connect_timeout: float = 12, min_interval: float = 0.1) -> None:
+                 idle_grace: float = 20, connect_timeout: float = 12, min_interval: float = 0.1,
+                 port_provider=None, audit_label: str | None = None) -> None:
         self.host, self.port = host, port
+        # como a maquina aparece no registro (Beckhoff: o IP do painel, nao o x11vnc local)
+        self.audit_label = audit_label
+        # Beckhoff: a porta e a do x11vnc da ponte CERHost, que pode ainda nao existir ou mudar.
+        # O provedor e consultado a cada tentativa; None = tela ainda nao pronta (tenta de novo).
+        self.port_provider = port_provider
         self.view_password, self.control_password = view_password, control_password
         self.control_timeout, self.name, self.audit_path = control_timeout, name, audit_path
         self.idle_grace, self.connect_timeout, self.min_interval = idle_grace, connect_timeout, min_interval
@@ -321,11 +329,15 @@ class VncHub:
     def ready(self) -> bool:
         return self._ready.is_set()
 
+    def current_port(self) -> int | None:
+        return self.port_provider() if self.port_provider is not None else self.port
+
     # ---------------- registro
     def audit(self, text: str) -> None:
         stamp = time.strftime("%Y-%m-%d %H:%M:%S")
         self.events.append({"time": time.time(), "text": text})
-        machine = f"[{self.name} {self.host}:{self.port}]"  # o registro e um so para todas as maquinas
+        where = self.audit_label or f"{self.host}:{self.port}"
+        machine = f"[{self.name} {where}]"  # o registro e um so para todas as maquinas
         log.info("VNC %s %s", machine, text)
         if self.audit_path:
             try:
@@ -490,6 +502,10 @@ class VncHub:
             self.state = "connecting"
             writer = None
             try:
+                port = self.current_port()
+                if port is None:
+                    raise ConnectionError("a tela da Beckhoff ainda não está pronta")
+                self.port = port
                 reader, writer = await asyncio.wait_for(asyncio.open_connection(self.host, self.port), 10)
                 await self._panel_handshake(reader, writer, password)
                 self._writer = writer
@@ -511,7 +527,7 @@ class VncHub:
                         self.audit(f"painel recusou a senha de operacao; {self.controller.peer} perdeu o controle")
                         self.controller = None
                     continue
-                await asyncio.sleep(3)
+                await asyncio.sleep(self.retry_delay)
             finally:
                 self._writer = None
                 if writer is not None:

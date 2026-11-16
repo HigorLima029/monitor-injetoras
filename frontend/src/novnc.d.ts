@@ -7,6 +7,7 @@ declare module '@novnc/novnc/lib/rfb' {
     background: string
     disconnect(): void
     focus(): void
+    sendKey(keysym: number, code: string | null, down?: boolean): void
     sendCredentials(credentials: { username?: string; password?: string; target?: string }): void
   }
 }

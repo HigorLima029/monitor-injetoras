@@ -1,5 +1,5 @@
 import RFB from '@novnc/novnc/lib/rfb'
-import { Eye, Hand, KeyRound, LockOpen, RefreshCw, Users } from 'lucide-react'
+import { Expand, Eye, Hand, KeyRound, LockOpen, RefreshCw, Shrink, Users } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState, type FormEvent } from 'react'
 import { getJson, type VncStatus } from './api'
 
@@ -15,6 +15,23 @@ function novoSid(): string {
 /** Motivo do último fechamento pelo servidor (ex.: "máquina trocada"), para a tela nova da próxima máquina. */
 let fechadaPor: { motivo: string; quando: number } | null = null
 
+/**
+ * Teclas físicas do painel Beckhoff (XMold): no CERHost cada uma é Ctrl + letra.
+ * Mesma ordem do teclado do painel: 1ª fileira Ctrl+Q..R, 2ª fileira Ctrl+A..F.
+ */
+const TECLAS_BECKHOFF: { letra: string; nome: string }[] = [
+  { letra: 'q', nome: 'Visão geral' }, { letra: 'w', nome: 'Molde' },
+  { letra: 'e', nome: 'Injeção' }, { letra: 'r', nome: 'Temperatura' },
+  { letra: 'a', nome: 'Extrator' }, { letra: 's', nome: 'Núcleo' },
+  { letra: 'd', nome: 'Dosagem' }, { letra: 'f', nome: 'Ajustes' },
+]
+const XK_CONTROL_L = 0xffe3
+
+type TecladoNavegador = { lock?: (teclas?: string[]) => Promise<void>; unlock?: () => void }
+function teclado(): TecladoNavegador | undefined {
+  return (navigator as Navigator & { keyboard?: TecladoNavegador }).keyboard
+}
+
 function mmss(segundos: number): string {
   const s = Math.max(0, Math.round(segundos))
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
@@ -25,8 +42,11 @@ function mmss(segundos: number): string {
  * A senha digitada define o papel: a de visualização só assiste; a de operação pode assumir o controle.
  * O servidor só repassa toques de quem está com o controle; os de todo o resto são descartados lá.
  */
-export function TelaAoVivo({ machineName }: { machineName?: string }) {
+export function TelaAoVivo({ machineName, kind }: { machineName?: string; kind?: string }) {
   const alvo = useRef<HTMLDivElement>(null)
+  const quadro = useRef<HTMLDivElement>(null)
+  const [telaCheia, setTelaCheia] = useState(false)
+  const [travaTeclado, setTravaTeclado] = useState(false)
   const rfb = useRef<RFB | null>(null)
   const [sid, setSid] = useState(novoSid)
   const [anterior] = useState(() => {
@@ -42,8 +62,12 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
   const [aviso, setAviso] = useState('')
   const [enviando, setEnviando] = useState(false)
 
+  const sidAtual = useRef(sid)
   useEffect(() => {
     if (!alvo.current) return
+    // Aba nova no hub: o que veio do status da conexão anterior não vale mais.
+    sidAtual.current = sid
+    setStatus(null)
     const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
     setEstado('conectando')
     setDetalhe('')
@@ -78,29 +102,76 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
 
   const atualizar = useCallback(async () => {
     try {
-      setStatus(await getJson<VncStatus>(`/api/vnc/status?sid=${sid}`))
+      const novo = await getJson<VncStatus>(`/api/vnc/status?sid=${sid}`)
+      if (sidAtual.current === sid) setStatus(novo)  // resposta de uma conexão anterior é ignorada
     } catch {
       /* a próxima rodada tenta de novo */
     }
   }, [sid])
 
+  // Antes de conectar também se lê o status: na Beckhoff ele diz em que passo está a ponte do CERHost.
   useEffect(() => {
-    if (estado !== 'conectado') {
-      setStatus(null)
-      setConfirmar(false)
-      return
-    }
+    if (estado !== 'conectado') setConfirmar(false)
     void atualizar()
     const id = window.setInterval(atualizar, 2000)
     return () => window.clearInterval(id)
   }, [estado, atualizar])
 
-  const operando = status?.controller?.me === true
+  const ativo = estado === 'conectado'  // controle e papel só valem com a tela conectada
+  const operando = ativo && status?.controller?.me === true
   useEffect(() => {
     if (!rfb.current) return
     rfb.current.viewOnly = !operando
     if (operando) rfb.current.focus()
   }, [operando])
+
+  /** Manda Ctrl + letra direto para o painel (não passa pelo teclado do navegador). */
+  const teclaPainel = (letra: string) => {
+    const r = rfb.current
+    if (!r || !operando) return
+    const code = `Key${letra.toUpperCase()}`
+    r.sendKey(XK_CONTROL_L, 'ControlLeft', true)
+    r.sendKey(letra.charCodeAt(0), code, true)
+    r.sendKey(letra.charCodeAt(0), code, false)
+    r.sendKey(XK_CONTROL_L, 'ControlLeft', false)
+    r.focus()
+  }
+
+  // Tela cheia + trava de teclado (Chrome/Edge): aí até Ctrl+W vai para o painel. Segure Esc para sair.
+  const alternarTelaCheia = async () => {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen().catch(() => undefined)
+      return
+    }
+    try {
+      await quadro.current?.requestFullscreen()
+    } catch {
+      setAviso('O navegador não deixou abrir em tela cheia.')
+      return
+    }
+    try {
+      await teclado()?.lock?.()
+      setTravaTeclado(Boolean(teclado()?.lock))
+    } catch {
+      setTravaTeclado(false)
+    }
+    rfb.current?.focus()
+  }
+  useEffect(() => {
+    const mudou = () => {
+      const cheia = document.fullscreenElement === quadro.current && quadro.current !== null
+      setTelaCheia(cheia)
+      if (!cheia) {
+        teclado()?.unlock?.()
+        setTravaTeclado(false)
+      }
+    }
+    document.addEventListener('fullscreenchange', mudou)
+    return () => {
+      document.removeEventListener('fullscreenchange', mudou)
+      teclado()?.unlock?.()
+    }
+  }, [])
 
   const controle = async (action: 'take' | 'release') => {
     setEnviando(true)
@@ -132,8 +203,29 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
   }
   const reconectar = useCallback(() => setSid(novoSid()), [])
 
-  const outro = status?.controller && !status.controller.me ? status.controller : null
-  const podeOperar = status?.role === 'control' && status.control_available
+  // Beckhoff: enquanto a ponte não conecta, o estado dela explica melhor que o erro genérico de VNC.
+  const ponte = status?.bridge && status.bridge.state !== 'connected' ? status.bridge : null
+  const ponteFalhou = ponte?.state === 'missing' || ponte?.state === 'error'
+  const ponteTexto = !ponte ? '' : ponteFalhou
+    ? (ponte.error || 'Não foi possível abrir a tela da Beckhoff.')
+    : ponte.state === 'connecting' ? 'Conectando ao painel…' : 'Abrindo a tela da Beckhoff…'
+  const ponteOk = status?.bridge?.state === 'connected'
+  // 'stopped' também pode ficar assim para sempre (ex.: ponte desligada): oferece tentar de novo.
+  const ponteTentar = ponteFalhou || ponte?.state === 'stopped'
+  // O erro só conta como "ponte não estava pronta" se ele aconteceu com a ponte fora do ar; então,
+  // quando ela ficar pronta, tenta de novo sozinho. Outros erros (senha errada...) ficam na tela.
+  const erroPorPonte = useRef(false)
+  useEffect(() => {
+    if (estado !== 'erro') { erroPorPonte.current = false; return }
+    if (ponte) erroPorPonte.current = true
+    else if (ponteOk && erroPorPonte.current) {
+      erroPorPonte.current = false
+      reconectar()
+    }
+  }, [ponte, ponteOk, estado, reconectar])
+
+  const outro = ativo && status?.controller && !status.controller.me ? status.controller : null
+  const podeOperar = ativo && status?.role === 'control' && status.control_available
 
   return (
     <div className="stack">
@@ -143,7 +235,7 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
           <p>A tela real da IHM, pelo VNC do painel. A senha de visualização só mostra a tela; a de operação permite assumir o controle.</p>
         </div>
         <span className="spacer" />
-        {status && (
+        {status && ativo && (
           <span className="live-flag" title="Pessoas assistindo agora">
             <Users size={16} aria-hidden="true" /> {status.viewers} assistindo
           </span>
@@ -195,8 +287,31 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
       )}
       {aviso && <div className="vnc-bar" role="alert">{aviso}</div>}
 
+      <div ref={quadro} className={`vnc-quadro${telaCheia ? ' cheia' : ''}`}>
+      <div className="vnc-tools">
+        {kind === 'ads' && (
+          <div className="panel-keys" role="group" aria-label="Teclas do painel">
+            {TECLAS_BECKHOFF.map((t) => (
+              <button key={t.letra} className="btn panel-key" disabled={!operando}
+                title={operando ? `Ctrl+${t.letra.toUpperCase()} no painel` : 'Assuma o controle para usar as teclas do painel'}
+                onClick={() => teclaPainel(t.letra)}>
+                <span>{t.nome}</span><kbd>Ctrl+{t.letra.toUpperCase()}</kbd>
+              </button>
+            ))}
+          </div>
+        )}
+        <span className="spacer" />
+        {telaCheia && (
+          <span className="muted small">
+            {travaTeclado ? 'Teclado preso no painel. Para sair, segure Esc.' : 'Para sair, aperte Esc. Neste navegador, Ctrl+W e parecidos continuam com o navegador: use os botões.'}
+          </span>
+        )}
+        <button className="btn" onClick={() => void alternarTelaCheia()}>
+          {telaCheia ? <><Shrink size={16} aria-hidden="true" /> Sair da tela cheia</> : <><Expand size={16} aria-hidden="true" /> Tela cheia</>}
+        </button>
+      </div>
       <div className={`panel vnc-panel${operando ? ' operando' : ''}`}>
-        {estado === 'senha' && (
+        {estado === 'senha' && !ponte && (
           <form className="vnc-overlay" onSubmit={enviarSenha}>
             <KeyRound size={22} aria-hidden="true" />
             <label htmlFor="vnc-senha">Senha do painel (visualização ou operação)</label>
@@ -205,15 +320,24 @@ export function TelaAoVivo({ machineName }: { machineName?: string }) {
             <p className="muted small">A senha não é guardada no navegador.</p>
           </form>
         )}
-        {estado === 'conectando' && <div className="vnc-overlay muted">Conectando ao painel…</div>}
+        {ponte && estado !== 'conectado' && estado !== 'erro' && (
+          ponteTentar ? (
+            <div className="vnc-overlay" role="alert">
+              <p>{ponteTexto}</p>
+              <button className="btn" onClick={reconectar}><RefreshCw size={16} aria-hidden="true" /> Tentar de novo</button>
+            </div>
+          ) : <div className="vnc-overlay muted" role="status">{ponteTexto}</div>
+        )}
+        {!ponte && estado === 'conectando' && <div className="vnc-overlay muted">Conectando ao painel…</div>}
         {estado === 'erro' && (
-          <div className="vnc-overlay">
-            <p>{detalhe || 'Não foi possível abrir a tela.'}</p>
-            <p className="muted small">Confira se o painel está ligado, se a porta VNC responde e as senhas no cadastro da máquina (página Máquinas).</p>
+          <div className="vnc-overlay" role="alert">
+            <p>{ponteFalhou ? ponteTexto : detalhe || 'Não foi possível abrir a tela.'}</p>
+            {!ponte && <p className="muted small">Confira se o painel está ligado, se a porta VNC responde e as senhas no cadastro da máquina (página Máquinas).</p>}
             <button className="btn" onClick={reconectar}><RefreshCw size={16} aria-hidden="true" /> Tentar de novo</button>
           </div>
         )}
         <div ref={alvo} className="vnc-screen" aria-label="Tela do painel" />
+      </div>
       </div>
     </div>
   )

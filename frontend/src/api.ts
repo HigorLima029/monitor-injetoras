@@ -132,6 +132,8 @@ export interface VncStatus {
   timeout: number
   controller: { me: boolean; peer: string; since: number | null; seconds_left: number } | null
   events?: { time: number; text: string }[]
+  /** Só na Beckhoff: estado da ponte que abre o CERHost (Wine) e o serve pelo hub VNC. */
+  bridge?: { state: 'stopped' | 'missing' | 'starting' | 'connecting' | 'connected' | 'error'; error: string | null }
 }
 
 export async function getJson<T>(url: string): Promise<T> {

@@ -70,6 +70,17 @@ class Settings:
     # AMS Net ID local do servidor (rota ADS); vazio = nao configurado
     ads_local_net_id: str = os.getenv("ADS_LOCAL_NET_ID", "")
     frontend_dist: str = _path(os.getenv("FRONTEND_DIST", "frontend/dist"))
+    # Tela ao vivo da Beckhoff: CERHOST.exe rodando no Wine numa tela virtual (Xvfb :N).
+    # Vazio = tela da Beckhoff desligada (com aviso); os dados ADS seguem normais.
+    cerhost_exe: str = _path(os.getenv("CERHOST_EXE", "")) if os.getenv("CERHOST_EXE", "").strip() else ""
+    cerhost_display: int = int(os.getenv("CERHOST_DISPLAY", "99"))
+    # Prefixo Wine DEDICADO ao CERHost (opcional). Com ele, ao parar a ponte roda `wineserver -k`
+    # só nesse prefixo. Vazio = usa o prefixo herdado e nunca roda `wineserver -k`
+    # (mataria outros programas Wine do mesmo usuário).
+    cerhost_wineprefix: str = (_path(os.getenv("CERHOST_WINEPREFIX", ""))
+                               if os.getenv("CERHOST_WINEPREFIX", "").strip() else "")
+    # pids dos processos da ponte: a proxima subida encerra as sobras de um Monitor que caiu feio
+    cerhost_pidfile: str = _path(os.getenv("CERHOST_PIDFILE", "data/cerhost.pids"))
 
 
 settings = Settings()

@@ -352,3 +352,40 @@ def test_troca_de_maquina_avisa_o_navegador(tmp_path, monkeypatch, panel):
                 for _ in range(20):
                     ws.receive_bytes()
             assert exc.value.reason == "máquina trocada"
+
+
+def test_porta_do_painel_segue_o_provedor():
+    """Beckhoff: a porta do x11vnc vem da ponte e pode ainda não existir (ou mudar)."""
+    async def run():
+        panel = FakePanel(VIEW, CONTROL)
+        real = panel.start()
+        port = {"v": None}
+        hub = VncHub("127.0.0.1", 0, VIEW, CONTROL, idle_grace=0.2, min_interval=0.02,
+                     port_provider=lambda: port["v"])
+        hub.retry_delay = 0.05
+        await hub.start_tcp("127.0.0.1", 0)
+        try:
+            entra = asyncio.create_task(Viewer.connect(hub.tcp_port, VIEW))
+            await asyncio.sleep(0.3)
+            assert hub.state == "error" and "ainda não está pronta" in hub.error
+            port["v"] = real
+            v = await asyncio.wait_for(entra, 5)
+            assert hub.port == real
+            assert await v.frame()
+            v.close()
+        finally:
+            await hub.close()
+            await asyncio.sleep(0.1)  # o painel falso vê a conexão fechar antes de parar
+            panel.stop()
+
+    asyncio.run(run())
+
+
+def test_registro_com_rotulo_da_maquina(tmp_path):
+    """Beckhoff: o hub liga no x11vnc local, mas o registro mostra o IP do painel."""
+    log_path = tmp_path / "audit.log"
+    hub = VncHub("127.0.0.1", 45901, VIEW, CONTROL, name="Bk", audit_path=str(log_path),
+                 audit_label="10.0.0.7")
+    hub.audit("alguem entrou")
+    linha = log_path.read_text(encoding="utf-8")
+    assert "[Bk 10.0.0.7] alguem entrou" in linha and "127.0.0.1" not in linha

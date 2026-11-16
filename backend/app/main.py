@@ -325,6 +325,11 @@ async def ws_vnc(socket: WebSocket, sid: str = Query("", max_length=64)):
     await socket.accept(subprotocol="binary" if "binary" in offered else None)
     mgr = _mgr(app)
     hub: VncHub | None = mgr.hub
+    bridge = mgr.bridge
+    if hub is not None and bridge is not None and bridge.state == "missing":
+        # Beckhoff sem as ferramentas no servidor: não adianta esperar, diz o que falta
+        await socket.close(code=1008, reason=_close_reason(bridge.error or "Tela da Beckhoff indisponível"))
+        return
     if hub is None:
         m = mgr.machine
         if m is None:
@@ -337,6 +342,12 @@ async def ws_vnc(socket: WebSocket, sid: str = Query("", max_length=64)):
         return
     peer = socket.client.host if socket.client else "navegador"
     await hub.serve(WebSocketTransport(socket), sid or f"ws-{id(socket):x}", peer)
+
+
+def _close_reason(text: str) -> str:
+    """O motivo do fechamento do WebSocket cabe em 123 bytes (UTF-8)."""
+    raw = text.encode("utf-8")
+    return text if len(raw) <= 123 else raw[:120].decode("utf-8", "ignore") + "..."
 
 
 class VncControl(BaseModel):
@@ -353,7 +364,11 @@ def _hub_or_404() -> VncHub:
 
 @app.get("/api/vnc/status")
 def vnc_status(sid: str = Query("", max_length=64)):
-    return _hub_or_404().status(sid)
+    out = _hub_or_404().status(sid)
+    bridge = _mgr(app).bridge
+    if bridge is not None:  # Beckhoff: estado da ponte CERHost (o que falta, se conectou)
+        out["bridge"] = {"state": bridge.state, "error": bridge.error}
+    return out
 
 
 @app.post("/api/vnc/control")
