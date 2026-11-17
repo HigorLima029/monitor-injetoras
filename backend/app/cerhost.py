@@ -47,7 +47,12 @@ log = logging.getLogger("cerhost")
 TOOLS = ("Xvfb", "openbox", "wine", "xdotool", "wmctrl", "x11vnc")
 MAIN_TITLE = "Remote Display Control for Windows CE"
 IGNORED_TITLES = frozenset({MAIN_TITLE, "Default IME"})
-SCREEN = "800x1000x24"  # o painel e em pe (~600x850 com a barra do CERHost)
+# Tela virtual grande: o CERHost se ajusta sozinho ao tamanho do painel (XMold ~600x850,
+# CB3055 maior) e o x11vnc transmite so o recorte da janela. Numa tela pequena o CERHost
+# fica com barras de rolagem e corta o painel.
+SCREEN = os.getenv("CERHOST_SCREEN", "1920x1920x24")
+# Maximizar so serve numa tela do tamanho do painel; numa tela grande deixaria area vazia.
+MAXIMIZE = os.getenv("CERHOST_MAXIMIZE", "0") == "1"
 ALL = ("x11vnc", "cerhost", "openbox", "xvfb")  # ordem de encerramento
 LOG_TAIL_LINES = 10      # linhas do stderr de um processo que morreu, no log
 LOG_TAIL_BYTES = 4096
@@ -424,7 +429,8 @@ class CerhostBridge:
         if title is None:
             raise BridgeError(f"o CERHost não conectou em {self.host} em {self.connect_timeout:g} s",
                               restart_cerhost=not unknown)
-        await self._cmd(["wmctrl", "-r", title, "-b", "add,maximized_vert,maximized_horz"])
+        if MAXIMIZE:
+            await self._cmd(["wmctrl", "-r", title, "-b", "add,maximized_vert,maximized_horz"])
         log.info("CERHost conectado em %s (%s)", self.host, title)
 
     async def _safe_to_type(self, main_wid: str, where: str) -> bool:

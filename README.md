@@ -126,6 +126,9 @@ No `.env`:
 
 - `CERHOST_EXE=` caminho do `CERHOST.exe` (sem padrão; vazio = tela da Beckhoff desligada, com aviso).
 - `CERHOST_DISPLAY=99` número da tela virtual (Xvfb `:99`).
+- `CERHOST_SCREEN=1920x1920x24` tamanho da tela virtual. O CERHost se ajusta sozinho ao tamanho do painel
+  e só a janela dele é transmitida. Modo antigo (tela justa e janela maximizada): `CERHOST_SCREEN=800x1000x24`
+  e `CERHOST_MAXIMIZE=1`.
 - `CERHOST_WINEPREFIX=` prefixo Wine dedicado ao CERHost (opcional). Com ele, ao encerrar a
   ponte roda `wineserver -k` só nesse prefixo; vazio = usa o prefixo herdado e nunca roda
   `wineserver -k`.

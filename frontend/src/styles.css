@@ -439,9 +439,10 @@ textarea { resize: vertical; }
 
 /* Tela ao vivo: teclas do painel e tela cheia */
 .vnc-quadro { display: flex; flex-direction: column; gap: 8px; }
-.vnc-quadro.cheia { background: var(--bg); padding: 8px; height: 100vh; }
-.vnc-quadro.cheia .vnc-panel { flex: 1; min-height: 0; }
-.vnc-quadro.cheia .vnc-screen { height: calc(100vh - 110px); }
+.vnc-quadro.cheia { background: var(--bg); padding: 8px; height: 100vh; box-sizing: border-box; }
+/* tela cheia: o painel ocupa exatamente o que sobra abaixo dos botões (que podem ter 1 ou 2 linhas) */
+.vnc-quadro.cheia .vnc-panel { flex: 1; min-height: 0; padding: 6px; }
+.vnc-quadro.cheia .vnc-screen { height: 100%; min-height: 0; }
 .vnc-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .panel-keys { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
 .panel-keys.cinco { grid-template-columns: repeat(5, minmax(0, 1fr)); }

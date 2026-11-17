@@ -227,11 +227,12 @@ def test_sequencia_de_conexao(tmp_path, monkeypatch):
             assert b.error is None
             assert runner.keys() == SEQ
             xvfb = runner.procs("Xvfb")[0].argv
-            assert xvfb[1] == ":99" and xvfb[2:5] == ["-screen", "0", "800x1000x24"]
+            assert xvfb[1] == ":99" and xvfb[2:5] == ["-screen", "0", "1920x1920x24"]
             assert runner.procs("openbox") and runner.procs("x11vnc")
             wine = runner.procs("wine")[0]
             assert wine.argv[1] == str(tmp_path / "CERHOST.exe")
-            assert ["wmctrl", "-r", PANEL, "-b", "add,maximized_vert,maximized_horz"] in runner.commands
+            # tela grande: o CERHost se ajusta ao painel sozinho, sem maximizar
+            assert not any(c[0] == "wmctrl" and "maximized_vert,maximized_horz" in c for c in runner.commands)
             # janelas so do processo do CERHost
             searches = [c for c in runner.commands if c[:2] == ["xdotool", "search"]]
             assert searches  # janelas filtradas pelo grupo do processo do CERHost (pgid_of)
