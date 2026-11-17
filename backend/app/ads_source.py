@@ -39,17 +39,33 @@ MSG_TIME_OFFSET = 56
 MSG_TIME_LEN = 23
 
 # tag -> (símbolo no PLC, tipo pyads)
+# Os quatro primeiros vieram do kit de campo; os demais do mapa da própria Chen Hsong
+# (tabela Xmold2 do banco /work/user do gateway CHL3200, versão TwinCAT 2).
 _SCALARS = {
     "CycleMonitor": (".CYCLETIME_MQTT", "LREAL"),
     "ProductionCount": (".NPARTSCNT_MQTT", "DINT"),
     "GoodProduction": (".NGOODPARTS", "DINT"),
     "BadProduction": (".NBADPARTS", "DINT"),
+    "PlastLastTime": (".STAXIS_HMIITF[5].STLATCHEDVALUES.DOSINGTIME", "LREAL"),
+    "ColdLastTime": (".STAXIS_HMIITF[5].LATCHEDTIMER[1]", "LREAL"),
 }
+# Temperatura real de cada zona (TempZ<n>Now).
+_ACT_TEMP = ".AAAPFWTEMPTOHMI[{}].ACTUALTEMP"
+# Modo de operação: LEDs do teclado do painel. OperatorMode = valor da primeira lâmpada acesa.
+OPERATOR_MODES = {1.0: "Manual", 2.0: "Semiautomático", 3.0: "Automático", 4.0: "Ajuste"}
+_MODE_SYMBOLS = [
+    (".STUSBLED.FULLAUTOMATIC", 3.0),
+    (".STUSBLED.SEMIAUTOMATIC", 2.0),
+    (".STUSBLED.MANUALON", 1.0),
+    (".STUSBLED.CALIBRATIONON", 4.0),
+]
 _TEMP_SYMBOL = ".AAAPFWTEMPPPARAMFROMHMI"
 _MSG_SYMBOL = ".STHMIMESSAGE"
 
 FIXED_TAGS = (
     list(_SCALARS)
+    + ["OperatorMode"]
+    + [f"TempZ{z}Now" for z in range(1, ZONES + 1)]
     + [f"TempZ{z}" for z in range(1, ZONES + 1)]
     + [f"StandbyTempZ{z}" for z in range(1, ZONES + 1)]
 )
@@ -80,6 +96,8 @@ class AdsSource:
         self._plc = None
         self._seen_alarms: set[int] = set()
         self._logged: set[str] = set()
+        self._sum_ok: bool | None = None   # o PLC aceita leitura em lote (sum read)? None = ainda não sei
+        self._missing: set[str] = set()    # símbolos que este PLC não tem (até reconectar)
 
     async def connect(self) -> None:
         global _porta_aberta
@@ -96,6 +114,8 @@ class AdsSource:
         plc = factory(self.ams_net_id, self.port, self.host)
         await asyncio.to_thread(plc.open)
         self._plc = plc
+        self._sum_ok = None
+        self._missing = set()
 
     async def close(self) -> None:
         plc, self._plc = self._plc, None
@@ -121,6 +141,44 @@ class AdsSource:
             self._logged.add(chave)
             log.warning("ADS %s: leitura de %s falhou: %s", self.host, chave, exc)
 
+    def _read_named(self, plc, wanted: dict[str, str]) -> tuple[dict[str, object], list[Exception], int]:
+        """Lê símbolos simples por nome. Tenta um lote só (uma ida e volta no 4G);
+        se o PLC não aceitar, lê um por um. Devolve (valores, erros, tentativas)."""
+        syms = [s for s in wanted if s not in self._missing]
+        vals: dict[str, object] = {}
+        erros: list[Exception] = []
+        if not syms:
+            return vals, erros, 0
+        if self._sum_ok is not False and len(syms) > 1:
+            try:
+                res = plc.read_list_by_name(syms)
+            except Exception:
+                res = None
+            if res is not None:
+                self._sum_ok = True
+                for s in syms:
+                    v = res.get(s)
+                    if v is None or isinstance(v, str):  # pyads devolve o texto do erro no lugar do valor
+                        exc = RuntimeError(f"leitura em lote falhou: {v}")
+                        erros.append(exc)
+                        self._falha(s, exc)
+                    else:
+                        vals[s] = v
+                return vals, erros, len(syms)
+        falhou: list[str] = []
+        for s in syms:
+            try:
+                vals[s] = plc.read_by_name(s, _plctype(wanted[s]))
+            except Exception as exc:
+                erros.append(exc)
+                falhou.append(s)
+                self._falha(s, exc)
+        if vals:  # a conexão está boa: o que falhou é símbolo que este painel não tem
+            self._missing.update(falhou)
+            if not falhou and len(syms) > 1:
+                self._sum_ok = False  # tudo existe e mesmo assim o lote falhou: PLC sem leitura em lote
+        return vals, erros, len(syms)
+
     def _read_all(self, tags: list[str]) -> dict[str, object]:
         plc = self._plc
         if plc is None:
@@ -130,17 +188,41 @@ class AdsSource:
         tentativas = 0
         erros: list[Exception] = []
 
+        wanted: dict[str, str] = {}
         for tag in tags:
             if tag in _SCALARS:
                 name, kind = _SCALARS[tag]
-                tentativas += 1
+                wanted[name] = kind
+            elif tag.startswith("TempZ") and tag.endswith("Now"):
                 try:
-                    out[tag] = plc.read_by_name(name, _plctype(kind))
-                except Exception as exc:
-                    erros.append(exc)
-                    self._falha(name, exc)
+                    z = int(tag[5:-3])
+                except ValueError:
+                    continue
+                if 1 <= z <= ZONES:
+                    wanted[_ACT_TEMP.format(z)] = "LREAL"
+            elif tag == "OperatorMode":
+                for name, _ in _MODE_SYMBOLS:
+                    wanted[name] = "BOOL"
+        if wanted:
+            vals, errs, n = self._read_named(plc, wanted)
+            erros += errs
+            tentativas += n
+            for tag in tags:
+                if tag in _SCALARS and _SCALARS[tag][0] in vals:
+                    out[tag] = vals[_SCALARS[tag][0]]
+                elif tag.startswith("TempZ") and tag.endswith("Now"):
+                    try:
+                        sym = _ACT_TEMP.format(int(tag[5:-3]))
+                    except ValueError:
+                        continue
+                    if sym in vals:
+                        out[tag] = vals[sym]
+            if "OperatorMode" in tags:
+                lidos = [(code, vals[name]) for name, code in _MODE_SYMBOLS if name in vals]
+                if lidos:
+                    out["OperatorMode"] = next((code for code, on in lidos if on), 0.0)
 
-        if any(t.startswith(("TempZ", "StandbyTempZ")) for t in tags):
+        if any(t.startswith(("TempZ", "StandbyTempZ")) and not t.endswith("Now") for t in tags):
             tentativas += 1
             try:
                 raw = self._read_block(plc, _TEMP_SYMBOL, ZONES * ZONE_STRIDE)

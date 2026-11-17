@@ -1,4 +1,4 @@
-import { AlertTriangle, Gauge, Package, Timer } from 'lucide-react'
+import { AlertTriangle, Gauge, Package, SlidersHorizontal, Timer } from 'lucide-react'
 import { useMemo, useState } from 'react'
 import type { Alarms, History, Info, Live, Production, TagRow } from './api'
 import { num, usePoll } from './api'
@@ -23,6 +23,9 @@ function useHistory(tags: string[], minutes: number) {
   return usePoll<History>(url, minutes > 480 ? 60000 : 15000).data
 }
 
+// Beckhoff: OperatorMode vem das lâmpadas do teclado do painel (ver ads_source.OPERATOR_MODES).
+const MODOS_BECKHOFF: Record<number, string> = { 0: 'Nenhum', 1: 'Manual', 2: 'Semiautomático', 3: 'Automático', 4: 'Ajuste' }
+
 function scrapPct(prod: Production | null) {
   if (!prod || prod.produced <= 0) return null
   return (prod.bad / prod.produced) * 100
@@ -37,10 +40,12 @@ export function Overview({ info, live, tokens }: PageProps) {
   const active = live?.status.active_alarms.length ?? 0
   const scrap = scrapPct(prod)
   const since = (tag: string) => alarms?.events.find((e) => e.tag === tag && e.ended === null)?.started
+  const beckhoff = info.profile === 'ads'
+  const modo = num(v.OperatorMode)
 
   return (
     <div className="stack">
-      <div className="grid tiles">
+      <div className={beckhoff ? 'grid tiles cinco' : 'grid tiles'}>
         <Tile icon={<Package size={16} aria-hidden="true" />} label="Peças nas últimas 8 h"
           value={fmt(prod?.produced ?? null, 0)}
           sub={`Contador da máquina: ${fmt(num(v.ProductionCount), 0)}`} />
@@ -53,6 +58,11 @@ export function Overview({ info, live, tokens }: PageProps) {
         <Tile icon={<AlertTriangle size={16} aria-hidden="true" />} label="Alarmes ativos"
           value={String(active)} alert={active > 0}
           sub={`${alarms?.monitored ?? '—'} alarmes monitorados`} />
+        {beckhoff && (
+          <Tile icon={<SlidersHorizontal size={16} aria-hidden="true" />} label="Modo de operação"
+            value={modo === null ? '—' : (MODOS_BECKHOFF[modo] ?? `Código ${modo}`)}
+            sub="Lâmpada acesa no teclado do painel" />
+        )}
       </div>
 
       <section className="panel">

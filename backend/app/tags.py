@@ -58,11 +58,12 @@ SETPOINT_TAGS = sorted({t for z in BARREL_ZONES for t in z[2:]} | {"TempOil", "M
 ADS_ZONES: list[tuple[str, str, str, str, str]] = [
     (f"Zona {z}", f"TempZ{z}Now", f"TempZ{z}", f"MinTempZ{z}", f"MaxTempZ{z}") for z in range(1, 9)
 ]
-# Setpoints que só existem nas máquinas com mais de 5 zonas.
+# Setpoints e temperaturas reais que só existem nas máquinas com mais de 5 zonas.
 EXTRA_SETPOINT_TAGS = ["TempZ6", "TempZ7", "TempZ8"]
+EXTRA_ACTUAL_TAGS = ["TempZ6Now", "TempZ7Now", "TempZ8Now"]
 
 # Tags gravadas no histórico (SQLite) a cada leitura.
-HISTORY_TAGS = [t[0] for t in KPI_TAGS] + SETPOINT_TAGS + EXTRA_SETPOINT_TAGS
+HISTORY_TAGS = [t[0] for t in KPI_TAGS] + SETPOINT_TAGS + EXTRA_SETPOINT_TAGS + EXTRA_ACTUAL_TAGS
 
 ALARM_PREFIX = "Warn"
 
