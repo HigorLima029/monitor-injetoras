@@ -144,10 +144,10 @@ class SimulatedSource:
 
     async def list_tags(self) -> list[str]:
         if not self._tags:
-            from .tags import ALARM_LABELS, EXTRA_SETPOINT_TAGS, HISTORY_TAGS
+            from .tags import ALARM_LABELS, EXTRA_ACTUAL_TAGS, EXTRA_SETPOINT_TAGS, HISTORY_TAGS
 
             # o simulador imita a CHY (5 zonas + bico): sem as zonas extras da Beckhoff
-            base = set(HISTORY_TAGS) - set(EXTRA_SETPOINT_TAGS)
+            base = set(HISTORY_TAGS) - set(EXTRA_SETPOINT_TAGS) - set(EXTRA_ACTUAL_TAGS)
             self._tags = sorted(base | set(ALARM_LABELS) | set(self.recipe))
         return self._tags
 

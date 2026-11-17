@@ -178,3 +178,109 @@ def test_alarme_desconhecido_chega_ao_coletor(tmp_path):
             await src.close()
             storage.close()
     asyncio.run(run())
+
+
+# --- mapa da Chen Hsong (tabela Xmold2 do gateway CHL3200) ---
+
+class PlcMapa(FakePlc):
+    """PLC com os símbolos do mapa Xmold2 e leitura em lote (sum read)."""
+
+    def __init__(self, *a, lote=True):
+        super().__init__(*a)
+        self.lote = lote
+        self.lotes = 0
+        self.unitarias = 0
+        for z in range(1, 9):
+            self.escalares[f".AAAPFWTEMPTOHMI[{z}].ACTUALTEMP"] = 180.0 + z
+        self.escalares.update({
+            ".STAXIS_HMIITF[5].STLATCHEDVALUES.DOSINGTIME": 4.2,
+            ".STAXIS_HMIITF[5].LATCHEDTIMER[1]": 12.0,
+            ".STUSBLED.FULLAUTOMATIC": False,
+            ".STUSBLED.SEMIAUTOMATIC": True,
+            ".STUSBLED.MANUALON": False,
+            ".STUSBLED.CALIBRATIONON": False,
+        })
+
+    def read_by_name(self, name, plctype):
+        self.unitarias += 1
+        return self.escalares[name]
+
+    def read_list_by_name(self, names):
+        if not self.lote:
+            raise RuntimeError("ADSERR 1793: servico nao suportado")
+        self.lotes += 1
+        faltando = [n for n in names if n not in self.escalares]
+        if faltando:  # pyads: símbolo inexistente derruba a consulta de informações
+            raise RuntimeError(f"symbol not found: {faltando[0]}")
+        return {n: self.escalares[n] for n in names}
+
+
+def test_temperatura_real_modo_e_fases_em_um_lote():
+    async def run():
+        plc = PlcMapa()
+        src = _src(plc)
+        await src.connect()
+        v = await src.read(["TempZ1Now", "TempZ8Now", "TempZ5", "OperatorMode",
+                            "PlastLastTime", "ColdLastTime", "CycleMonitor"])
+        assert v["TempZ1Now"] == 181.0 and v["TempZ8Now"] == 188.0
+        assert v["TempZ5"] == 195.0          # setpoint continua vindo do bloco antigo
+        assert v["OperatorMode"] == 2.0      # semiautomático
+        assert v["PlastLastTime"] == 4.2 and v["ColdLastTime"] == 12.0
+        assert v["CycleMonitor"] == 24.5
+        assert plc.lotes == 1 and plc.unitarias == 0  # uma ida e volta só
+        assert {"TempZ1Now", "OperatorMode", "PlastLastTime"} <= set(await src.list_tags())
+    asyncio.run(run())
+
+
+def test_modo_sem_lampada_acesa_e_zero():
+    async def run():
+        plc = PlcMapa()
+        plc.escalares[".STUSBLED.SEMIAUTOMATIC"] = False
+        src = _src(plc)
+        await src.connect()
+        assert (await src.read(["OperatorMode"]))["OperatorMode"] == 0.0
+    asyncio.run(run())
+
+
+def test_plc_sem_leitura_em_lote_le_um_por_um_e_para_de_tentar_o_lote():
+    async def run():
+        plc = PlcMapa(lote=False)
+        src = _src(plc)
+        await src.connect()
+        tags = ["TempZ1Now", "TempZ2Now", "CycleMonitor"]
+        v = await src.read(tags)
+        assert v["TempZ1Now"] == 181.0 and v["CycleMonitor"] == 24.5
+        await src.read(tags)
+        assert src._sum_ok is False
+        assert plc.unitarias == 6  # 3 + 3, sem insistir no lote na segunda leitura
+    asyncio.run(run())
+
+
+def test_simbolo_que_o_painel_nao_tem_vira_none_e_o_lote_volta_sem_ele():
+    async def run():
+        plc = PlcMapa()
+        del plc.escalares[".AAAPFWTEMPTOHMI[7].ACTUALTEMP"]
+        src = _src(plc)
+        await src.connect()
+        tags = ["TempZ6Now", "TempZ7Now", "CycleMonitor"]
+        v = await src.read(tags)
+        assert v["TempZ7Now"] is None and v["TempZ6Now"] == 186.0 and v["CycleMonitor"] == 24.5
+        plc.unitarias = 0
+        v = await src.read(tags)
+        assert v["TempZ7Now"] is None and v["TempZ6Now"] == 186.0
+        assert plc.unitarias == 0 and src._sum_ok is True  # segunda leitura: lote sem o símbolo ausente
+    asyncio.run(run())
+
+
+def test_erro_por_item_no_lote_vira_none():
+    async def run():
+        class Parcial(PlcMapa):
+            def read_list_by_name(self, names):
+                r = super().read_list_by_name(names)
+                r[".STAXIS_HMIITF[5].LATCHEDTIMER[1]"] = "ADSERR_DEVICE_SYMBOLNOTFOUND"
+                return r
+        src = _src(Parcial())
+        await src.connect()
+        v = await src.read(["ColdLastTime", "PlastLastTime"])
+        assert v["ColdLastTime"] is None and v["PlastLastTime"] == 4.2
+    asyncio.run(run())
