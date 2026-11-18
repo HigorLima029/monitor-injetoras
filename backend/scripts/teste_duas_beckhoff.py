@@ -31,7 +31,7 @@ except ImportError:  # pragma: no cover
 
 DURACAO_S = 60
 INTERVALO_S = 2
-PORTA_ADS = 851
+PORTA_ADS_PADRAO = 801  # runtime PLC do TwinCAT 2 (mesmo default de ads_source.py)
 VARIAVEIS = (".CYCLETIME_MQTT", ".AAAPFWTEMPTOHMI[1].ACTUALTEMP")
 
 
@@ -45,10 +45,10 @@ def ler_netid_ip(texto: str) -> tuple[str, str]:
     return net_id.strip(), ip.strip()
 
 
-def abrir(rotulo: str, net_id: str, ip: str):
-    conexao = pyads.Connection(net_id, PORTA_ADS, ip)
+def abrir(rotulo: str, net_id: str, ip: str, porta: int):
+    conexao = pyads.Connection(net_id, porta, ip)
     conexao.open()
-    print(f"[{rotulo}] conexão aberta: {net_id} em {ip}:{PORTA_ADS}")
+    print(f"[{rotulo}] conexão aberta: {net_id} em {ip}:{porta}")
     return conexao
 
 
@@ -85,6 +85,10 @@ def main(argv: list[str] | None = None) -> int:
         "--b", required=True, type=ler_netid_ip, metavar="NETID@IP",
         help="segunda Beckhoff, ex.: 5.112.28.141.1.1@192.168.0.111",
     )
+    parser.add_argument(
+        "--porta", type=int, default=PORTA_ADS_PADRAO,
+        help=f"porta ADS do runtime PLC (padrão {PORTA_ADS_PADRAO}, TwinCAT 2)",
+    )
     args = parser.parse_args(argv)
 
     if pyads is None:
@@ -101,7 +105,11 @@ def main(argv: list[str] | None = None) -> int:
     try:
         pyads.set_local_address(local_net_id)
         for rotulo, (net_id, ip) in rotulos.items():
-            conexoes[rotulo] = abrir(rotulo, net_id, ip)
+            try:
+                conexoes[rotulo] = abrir(rotulo, net_id, ip, args.porta)
+            except Exception as exc:  # noqa: BLE001
+                print(f"Falha ao abrir conexão [{rotulo}] {net_id}@{ip}: {exc}", file=sys.stderr)
+                return 1
 
         print(f"Lendo por {DURACAO_S} s, a cada {INTERVALO_S} s. Ctrl+C para interromper.")
         inicio = time.monotonic()
@@ -121,7 +129,7 @@ def main(argv: list[str] | None = None) -> int:
         print("Interrompido pelo usuário.")
         return 130
     except Exception as exc:  # noqa: BLE001
-        print(f"Falha ao abrir conexão: {exc}", file=sys.stderr)
+        print(f"Falha inesperada: {exc}", file=sys.stderr)
         return 1
     finally:
         for conexao in conexoes.values():
