@@ -316,3 +316,225 @@ def test_put_client_id_null_limpa_cliente(api):
     r = client.put(f"/api/machines/{b}", json={"client_id": None})
     assert r.status_code == 200 and r.json()["client_id"] is None
     assert store.get(b).client_id is None
+
+
+# ---- permissões por perfil --------------------------------------------------
+from app import authz  # noqa: E402
+from app.accounts import Grant, User  # noqa: E402
+
+SENHA_VNC = "SENHA-VNC-9f3k"
+ROTAS = ["/info", "/live", "/history?tags=CycleMonitor", "/production", "/alarms",
+         "/values?tags=CycleMonitor", "/tags"]
+CONEXAO = ("host", "opcua_port", "namespace", "ams_net_id", "ads_port", "vnc_port", "notes",
+           "opcua_url")
+
+
+@pytest.fixture
+def multi(tmp_path, client_as, accounts):
+    """Cliente A com a máquina MA, cliente B com MB e uma máquina em preparação (MP)."""
+    ca = accounts.add_client("Cliente A").id
+    cb = accounts.add_client("Cliente B").id
+    store = MachineStore(str(tmp_path / "m.db"))
+    ma = store.add(Machine(None, "MA", "em63", "10.1.1.1", client_id=ca, notes="nota secreta",
+                           vnc_view_password=SENHA_VNC, vnc_control_password=SENHA_VNC + "c")).id
+    mb = store.add(Machine(None, "MB", "demo", "10.2.2.2", client_id=cb)).id
+    mp = store.add(Machine(None, "MP", "demo", "10.3.3.3")).id
+    from app.sources import SimulatedSource
+    main.app.state.fleet = Fleet(store, _settings(tmp_path), source_factory=lambda m: SimulatedSource())
+    try:
+        yield SimpleNamespace(client_as=client_as, store=store, ca=ca, cb=cb, ma=ma, mb=mb, mp=mp)
+    finally:
+        del main.app.state.fleet
+
+
+def _sem_conexao(d: dict):
+    for k in CONEXAO:
+        assert k not in d, k
+
+
+@pytest.mark.parametrize("rota", ROTAS)
+def test_cliente_nao_ve_maquina_de_outro_cliente(multi, rota):
+    cli = multi.client_as("cliente", multi.ca)
+    assert cli.get(f"/api/machines/{multi.ma}{rota}").status_code == 200
+    for other in (multi.mb, multi.mp, 999):
+        r = cli.get(f"/api/machines/{other}{rota}")
+        assert r.status_code == 404 and r.json()["detail"] == "Máquina não encontrada", (other, rota)
+
+
+def test_cliente_nao_recebe_dados_de_conexao(multi):
+    cli = multi.client_as("cliente", multi.ca)
+    ms = cli.get("/api/machines").json()["machines"]
+    assert [m["id"] for m in ms] == [multi.ma]
+    assert set(ms[0]) == {"id", "name", "kind", "profile", "client_id", "client_name", "status", "vnc"}
+    assert ms[0]["client_name"] == "Cliente A"
+    info = cli.get(f"/api/machines/{multi.ma}/info").json()
+    _sem_conexao(info)
+    _sem_conexao(info["machine"])
+    assert info["vnc_control"] is False
+    assert "10.1.1.1" not in cli.get(f"/api/machines/{multi.ma}/info").text
+    # técnico vê conexão (sem senhas)
+    tec = multi.client_as("tecnico")
+    ms = {m["id"]: m for m in tec.get("/api/machines").json()["machines"]}
+    assert set(ms) == {multi.ma, multi.mb, multi.mp}
+    assert ms[multi.ma]["host"] == "10.1.1.1" and ms[multi.ma]["notes"] == "nota secreta"
+    assert ms[multi.ma]["client_name"] == "Cliente A" and "status" in ms[multi.ma]
+    assert tec.get(f"/api/machines/{multi.ma}/info").json()["opcua_url"]
+
+
+def test_ver_como_cliente(multi):
+    tec = multi.client_as("tecnico")
+    normal = tec.get(f"/api/machines/{multi.ma}/info").json()
+    assert normal["machine"]["host"] == "10.1.1.1"
+    info = tec.get(f"/api/machines/{multi.ma}/info", params={"as": "cliente"}).json()
+    _sem_conexao(info)
+    _sem_conexao(info["machine"])
+    assert info["vnc_control"] is False
+    cli = multi.client_as("cliente", multi.ca)  # cliente com ?as=: nada muda
+    assert cli.get(f"/api/machines/{multi.ma}/info", params={"as": "cliente"}).json()["machine"] == \
+        cli.get(f"/api/machines/{multi.ma}/info").json()["machine"]
+
+
+def test_filtro_por_cliente(multi):
+    tec = multi.client_as("tecnico")
+    ids = lambda q: [m["id"] for m in tec.get("/api/machines", params=q).json()["machines"]]  # noqa: E731
+    assert ids({"client_id": multi.ca}) == [multi.ma]
+    assert ids({"client_id": 0}) == [multi.mp]
+    cli = multi.client_as("cliente", multi.ca)
+    assert [m["id"] for m in cli.get("/api/machines", params={"client_id": multi.cb}).json()["machines"]] == []
+    assert [m["id"] for m in cli.get("/api/machines", params={"client_id": 0}).json()["machines"]] == []
+
+
+def test_so_mae_cadastra_e_vincula(multi, accounts):
+    body = {"name": "Nova", "kind": "demo", "host": "10.9.9.9"}
+    tec = multi.client_as("tecnico")
+    cli = multi.client_as("cliente", multi.cb)
+    for c in (tec, cli):
+        assert c.post("/api/machines", json=body).status_code == 403
+        assert c.put(f"/api/machines/{multi.mp}", json={"client_id": multi.cb}).status_code in (403, 404)
+        assert c.delete(f"/api/machines/{multi.mb}").status_code in (403, 404)
+    assert tec.put(f"/api/machines/{multi.mp}", json={"client_id": multi.cb}).status_code == 403
+    assert tec.delete(f"/api/machines/{multi.mb}").status_code == 403
+    assert multi.store.get(multi.mb) is not None
+    assert cli.get(f"/api/machines/{multi.mp}/live").status_code == 404
+    mae = multi.client_as("mae")
+    r = mae.put(f"/api/machines/{multi.mp}", json={"client_id": multi.cb})
+    assert r.status_code == 200 and r.json()["client_id"] == multi.cb
+    assert cli.get(f"/api/machines/{multi.mp}/live").status_code == 200
+    assert {m["id"] for m in cli.get("/api/machines").json()["machines"]} == {multi.mb, multi.mp}
+    r = mae.post("/api/machines", json={**body, "vnc_view_password": SENHA_VNC})
+    assert r.status_code == 201
+    new = r.json()["id"]
+    assert mae.delete(f"/api/machines/{new}").status_code == 204
+    rows = [a for a in accounts.audit() if a["action"] == "cadastro"]
+    assert len(rows) == 3 and {a["machine_id"] for a in rows} == {multi.mp, new}
+    assert not any(SENHA_VNC in a["detail"] for a in rows)
+    assert all(a["detail"] for a in rows)
+
+
+def test_test_so_mae_e_tecnico(multi):
+    cli = multi.client_as("cliente", multi.ca)
+    assert cli.post(f"/api/machines/{multi.ma}/test").status_code == 403
+    assert cli.post(f"/api/machines/{multi.mb}/test").status_code == 404
+    tec = multi.client_as("tecnico")
+    assert tec.post(f"/api/machines/{multi.ma}/test").status_code == 200
+
+
+def test_em_preparacao_invisivel_para_cliente(multi):
+    cli = multi.client_as("cliente", multi.ca)
+    assert multi.mp not in [m["id"] for m in cli.get("/api/machines").json()["machines"]]
+    assert cli.get(f"/api/machines/{multi.mp}/info").status_code == 404
+    with cli.websocket_connect(f"/ws/machines/{multi.mp}") as ws:
+        with pytest.raises(WebSocketDisconnect) as exc:
+            ws.receive_json()
+    assert exc.value.code == 4404
+    tec = multi.client_as("tecnico")
+    assert tec.get(f"/api/machines/{multi.mp}/info").status_code == 200
+
+
+def test_ws_de_maquina_de_outro_cliente_fecha(multi):
+    cli = multi.client_as("cliente", multi.ca)
+    rt = main.app.state.fleet.runtime(multi.mb)
+    for url in (f"/ws/machines/{multi.mb}", f"/ws/vnc?machine={multi.mb}"):
+        with cli.websocket_connect(url) as ws:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_bytes() if "vnc" in url else ws.receive_json()
+        assert exc.value.code == 4404 and exc.value.reason == "Máquina não encontrada", url
+    assert rt.viewers == 0
+    for path in (f"/api/vnc/status?machine={multi.mb}",):
+        assert cli.get(path).status_code == 404
+    r = cli.post(f"/api/vnc/control?machine={multi.mb}", json={"sid": "x", "action": "take"})
+    assert r.status_code == 404
+    with cli.websocket_connect(f"/ws/machines/{multi.ma}") as ws:
+        assert "status" in ws.receive_json()
+
+
+def test_ws_fecha_quando_maquina_sai_do_cliente(multi):
+    cli = multi.client_as("cliente", multi.ca)
+    mae = multi.client_as("mae")
+    with cli.websocket_connect(f"/ws/machines/{multi.ma}") as ws:
+        assert "status" in ws.receive_json()
+        assert mae.put(f"/api/machines/{multi.ma}", json={"client_id": multi.cb}).status_code == 200
+        with pytest.raises(WebSocketDisconnect) as exc:
+            for _ in range(50):
+                ws.receive_json()
+        assert exc.value.code == 4404
+
+
+def test_controle_da_tela_por_perfil(multi):
+    cli = multi.client_as("cliente", multi.ca)
+    assert main.app.state.fleet.runtime(multi.ma).hub is not None
+    r = cli.post(f"/api/vnc/control?machine={multi.ma}", json={"sid": "x", "action": "take"})
+    assert r.status_code == 403 and r.json()["detail"] == "Cliente só visualiza a tela."
+    tec = multi.client_as("tecnico")
+    r = tec.post(f"/api/vnc/control?machine={multi.ma}", json={"sid": "x", "action": "take"})
+    assert r.status_code == 403 and r.json()["detail"] == "Precisa da autorização do cliente."
+    assert cli.get("/api/vnc/status", params={"machine": multi.ma}).status_code == 200
+
+
+def test_nenhuma_senha_em_resposta(multi):
+    mae = multi.client_as("mae")
+    tec = multi.client_as("tecnico")
+    cli = multi.client_as("cliente", multi.ca)
+    for c in (mae, tec, cli):
+        texts = [c.get("/api/machines").text]
+        texts += [c.get(f"/api/machines/{multi.ma}{rota}").text for rota in ROTAS]
+        texts.append(c.get(f"/api/machines/{multi.ma}/info", params={"as": "cliente"}).text)
+        assert not any(SENHA_VNC in t for t in texts)
+    r = mae.put(f"/api/machines/{multi.ma}", json={"name": "MA2"})
+    assert SENHA_VNC not in r.text
+
+
+# ---- authz (unidade) -------------------------------------------------------
+def _u(role, client_id=None):
+    return User(1, "u", "U", role, client_id, True, False)
+
+
+def test_authz_regras():
+    m_a = Machine(1, "A", "demo", "h", client_id=5)
+    m_p = Machine(2, "P", "demo", "h")
+    assert authz.can_view(_u("mae"), m_a) and authz.can_view(_u("tecnico"), m_p)
+    assert authz.can_view(_u("cliente", 5), m_a)
+    assert not authz.can_view(_u("cliente", 6), m_a)
+    assert not authz.can_view(_u("cliente", None), m_p)  # None nunca casa com None
+    assert not authz.can_view(_u("estranho"), m_a)
+    assert authz.sees_connection(_u("mae")) and authz.sees_connection(_u("tecnico"))
+    assert not authz.sees_connection(_u("cliente", 5))
+    grant = Grant(1, 1, 9, "Maria", False, "", 0, 9e12, None)
+    assert authz.control_problem(_u("cliente", 5), m_a, grant) == "Cliente só visualiza a tela."
+    assert authz.control_problem(_u("tecnico"), m_a, None) == "Precisa da autorização do cliente."
+    assert authz.control_problem(_u("mae"), m_a, None) == "Precisa da autorização do cliente."
+    assert authz.control_problem(_u("tecnico"), m_a, grant) is None
+    assert authz.control_problem(_u("mae"), m_p, None) is None
+    assert authz.control_problem(_u("tecnico"), m_p, None) is None
+
+
+def test_authz_machine_view():
+    m = Machine(1, "A", "em63", "10.0.0.1", client_id=5, notes="n", vnc_view_password="x")
+    st = {"online": True}
+    v = authz.machine_view(_u("cliente", 5), m, st, "Cli")
+    assert v == {"id": 1, "name": "A", "kind": "em63", "profile": "em63", "client_id": 5,
+                 "client_name": "Cli", "status": st, "vnc": True}
+    assert authz.machine_view(_u("tecnico"), m, st, "Cli", as_client=True) == v
+    full = authz.machine_view(_u("mae"), m, st, "Cli")
+    assert full["host"] == "10.0.0.1" and full["client_name"] == "Cli" and full["status"] == st
+    assert "vnc_view_password" not in full

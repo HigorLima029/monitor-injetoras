@@ -7,13 +7,13 @@ import time
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import auth
+from . import auth, authz
 from .accounts import AccountStore, User, migrate_machine_clients
 from .collector import Collector, to_number
 from .config import settings
@@ -25,6 +25,8 @@ from .tags import ADS_ZONES, ALARM_PREFIX, BARREL_ZONES, KPI_META, alarm_label, 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
 NAO_ENCONTRADA = "Máquina não encontrada"
+SO_MAE = "Só a conta mãe pode fazer isso."
+SO_EQUIPE = "Só a conta mãe e os técnicos podem fazer isso."
 SEM_COLETA = "A coleta desta máquina não abriu. Veja o registro do servidor."
 WS_NAO_ENCONTRADA = 4404
 
@@ -81,12 +83,25 @@ def _fleet() -> Fleet:
 
 
 def _visible(user: User, m: Machine) -> bool:
-    return True
+    return authz.can_view(user, m)
 
 
 def _machine_view(user: User, m: Machine, *, as_client: bool = False) -> dict:
     fleet = _fleet()
-    return {**m.public(), "client_name": _client_name(fleet, m.client_id), "status": fleet.status_of(m.id)}
+    return authz.machine_view(user, m, fleet.status_of(m.id), _client_name(fleet, m.client_id),
+                              as_client=as_client)
+
+
+def _require(user: User, *roles: str) -> None:
+    if user.role not in roles:
+        raise HTTPException(403, SO_MAE if roles == ("mae",) else SO_EQUIPE)
+
+
+def _audit(request: Request, user: User, m: Machine, detail: str) -> None:
+    """Cadastro de máquina na auditoria (com o cliente da máquina, para filtrar por cliente).
+    O detalhe nunca leva senha: só nomes de campos."""
+    _fleet().accounts.log("cadastro", user, machine_id=m.id, client_id=m.client_id,
+                          ip=auth._ip(request), detail=detail)
 
 
 def _machine_or_404(user: User, id: int) -> Machine:
@@ -157,7 +172,7 @@ class MachineUpdate(BaseModel):
 def list_machines(client_id: int | None = None, user: User = Depends(auth.current_user)):
     """`client_id=0` = máquinas em preparação (sem cliente)."""
     out = []
-    for m in _fleet().store.list():
+    for m in _fleet().store.list():  # cliente: só as do próprio cliente, mesmo pedindo outro
         if not _visible(user, m):
             continue
         if client_id is not None and (m.client_id or 0) != client_id:
@@ -167,43 +182,69 @@ def list_machines(client_id: int | None = None, user: User = Depends(auth.curren
 
 
 @app.post("/api/machines", status_code=201)
-async def add_machine(body: MachineIn, user: User = Depends(auth.current_user)):
+async def add_machine(body: MachineIn, request: Request, user: User = Depends(auth.current_user)):
+    _require(user, "mae")
     fleet = _fleet()
     try:
         m = fleet.store.add(Machine(None, **body.model_dump()))
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+    _audit(request, user, m, f"criou a máquina {m.name} ({m.kind}, {_client_label(m)})")
     await fleet.add(m.id)
     return m.public()
 
 
 @app.put("/api/machines/{id}")
-async def update_machine(id: int, body: MachineUpdate, user: User = Depends(auth.current_user)):
+async def update_machine(id: int, body: MachineUpdate, request: Request,
+                         user: User = Depends(auth.current_user)):
     fleet = _fleet()
     before = _machine_or_404(user, id)
+    _require(user, "mae")
+    changes = body.model_dump(exclude_unset=True)
     try:
-        m = fleet.store.update(id, body.model_dump(exclude_unset=True))
+        m = fleet.store.update(id, changes)
     except KeyError:
         raise HTTPException(404, NAO_ENCONTRADA)
     except ValueError as exc:
         raise HTTPException(422, str(exc))
+    fields = sorted(f for f in _changed_fields(before, m))
+    if fields:
+        _audit(request, user, m, f"alterou a máquina {m.name} ({_client_label(m)}): {', '.join(fields)}")
     changed = any(getattr(before, f) != getattr(m, f) for f in CONNECTION_FIELDS)
     await fleet.reload(id, connection_changed=changed)
     return m.public()
 
 
 @app.delete("/api/machines/{id}", status_code=204)
-async def delete_machine(id: int, user: User = Depends(auth.current_user)):
+async def delete_machine(id: int, request: Request, user: User = Depends(auth.current_user)):
     fleet = _fleet()
-    _machine_or_404(user, id)
+    m = _machine_or_404(user, id)
+    _require(user, "mae")
     fleet.store.delete(id)
+    _audit(request, user, m, f"apagou a máquina {m.name} ({_client_label(m)})")
     await fleet.remove(id)
     return Response(status_code=204)
+
+
+def _client_label(m: Machine) -> str:
+    if m.client_id is None:
+        return "em preparação"
+    return f"cliente {_client_name(_fleet(), m.client_id) or m.client_id}"
+
+
+def _changed_fields(before: Machine, after: Machine):
+    """Nomes dos campos que mudaram (senhas aparecem só pelo nome, nunca pelo valor)."""
+    for f in ("name", "kind", "host", "client_id", "opcua_port", "namespace", "ams_net_id",
+              "ads_port", "vnc_enabled", "vnc_port", "vnc_view_password", "vnc_control_password",
+              "notes"):
+        if getattr(before, f) != getattr(after, f):
+            yield f
 
 
 @app.post("/api/machines/{id}/test")
 async def test_machine(id: int, user: User = Depends(auth.current_user)):
     m = _machine_or_404(user, id)
+    _require(user, *authz.STAFF)
     latency = await _fleet().check(m)
     return {"online": latency is not None, "latency_ms": latency}
 
@@ -457,6 +498,9 @@ async def vnc_control(body: VncControl, machine: int = Query(...), user: User = 
     rt = _hub_rt(user, machine)
     hub = rt.hub
     if body.action == "take":
+        problem = authz.control_problem(user, rt.machine, _fleet().accounts.active_grant(rt.machine.id))
+        if problem:
+            raise HTTPException(403, problem)
         ok, msg = await hub.take(body.sid)
         if not ok:
             raise HTTPException(403 if "visualizacao" in msg or "desligada" in msg else 409, msg)
