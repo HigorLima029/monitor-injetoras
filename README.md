@@ -237,6 +237,19 @@ Testes (incluem um servidor OPC-UA falso que imita o gateway):
 cd backend && .venv/bin/python -m pytest -q
 ```
 
+## Primeiro acesso
+
+A conta mãe (super-admin) só é criada por este comando, no servidor. Ele pede a
+senha (mínimo 12 caracteres) e mostra um segredo para cadastrar no app
+autenticador do celular; a conta só é gravada depois de você digitar o código.
+
+```bash
+cd backend && .venv/bin/python -m app.admin criar-mae --usuario higor --nome "Higor"
+```
+
+Esqueceu a senha ou perdeu o celular? Use `resetar-senha --usuario LOGIN` ou
+`resetar-2fa --usuario LOGIN` (qualquer perfil; derrubam as sessões abertas).
+
 ## Configuração (`.env`)
 
 | Variável | Padrão | Para quê |
