@@ -18,7 +18,7 @@ from .accounts import AccountStore, User, migrate_machine_clients
 from .collector import Collector, to_number
 from .config import settings
 from .machines import CONNECTION_FIELDS, Machine, MachineStore, seed_from_settings
-from .manager import Fleet, MachineRuntime
+from .manager import Fleet, MachineRuntime, ScreenLimit
 from .vnc_hub import WebSocketTransport
 from .tags import ADS_ZONES, ALARM_PREFIX, BARREL_ZONES, KPI_META, alarm_label, humanize
 
@@ -31,6 +31,7 @@ CLIENTE_NAO_ENCONTRADO = "Cliente não encontrado."
 WS_RECHECK_SECONDS = 5.0  # WebSocket de dados confere de novo se o usuário ainda vê a máquina
 SEM_COLETA = "A coleta desta máquina não abriu. Veja o registro do servidor."
 WS_NAO_ENCONTRADA = 4404
+WS_TENTE_DEPOIS = 1013  # "try again later": limite de telas da Beckhoff
 
 
 def build_fleet() -> Fleet:
@@ -500,18 +501,19 @@ async def _ws_vnc(socket: WebSocket, user: User, machine_id: int, sid: str):
     if rt is None:
         await socket.close(code=WS_NAO_ENCONTRADA, reason=NAO_ENCONTRADA)
         return
-    hub, bridge, m = rt.hub, rt.bridge, rt.machine
-    if hub is not None and bridge is not None and bridge.state == "missing":
+    try:
+        hub = await _fleet().open_screen(machine_id)  # sob demanda (Beckhoff: sobe a ponte)
+    except ScreenLimit as exc:
+        await socket.close(code=WS_TENTE_DEPOIS, reason=_close_reason(str(exc)))
+        return
+    if hub is None:
+        await socket.close(code=1008, reason="Tela ao vivo desligada para esta máquina")
+        return
+    bridge = rt.bridge
+    if bridge is not None and bridge.state == "missing":
         # Beckhoff sem as ferramentas no servidor: não adianta esperar, diz o que falta
         text = authz.TELA_INDISPONIVEL if _hide(user) else (bridge.error or "Tela da Beckhoff indisponível")
         await socket.close(code=1008, reason=_close_reason(text))
-        return
-    if hub is None:
-        if not m.effective_vnc_enabled or m.kind == "demo":
-            reason = "Tela ao vivo desligada para esta máquina"
-        else:
-            reason = "Defina a senha VNC de visualização no cadastro da máquina"
-        await socket.close(code=1008, reason=reason)
         return
     peer = socket.client.host if socket.client else "navegador"
     rt.enter()
@@ -532,18 +534,32 @@ class VncControl(BaseModel):
     action: str  # "take" | "release"
 
 
-def _hub_rt(user: User, machine_id: int) -> MachineRuntime:
+def _screen_rt(user: User, machine_id: int) -> MachineRuntime:
+    """Runtime de máquina com tela ao vivo (aberta ou não); sem tela = 404."""
     rt = _rt(user, machine_id)
-    if rt.hub is None:
+    if not _fleet()._wants_screen(rt.machine):
         raise HTTPException(404, "Tela ao vivo desligada")
     return rt
+
+
+def _closed_screen_status(rt: MachineRuntime) -> dict:
+    """Status de uma tela que ninguém abriu (ou que fechou por falta de uso): o hub sobe no /ws/vnc."""
+    m = rt.machine
+    out = {"open": False, "panel": {"state": "idle", "mode": "view", "error": None}, "viewers": 0,
+           "role": None, "control_available": m.kind == "ads" or bool(m.vnc_control_password),
+           "timeout": _fleet().settings.vnc_control_timeout, "controller": None}
+    if m.kind == "ads":
+        out["bridge"] = {"state": "stopped", "error": None}
+    return out
 
 
 @app.get("/api/vnc/status")
 def vnc_status(machine: int = Query(...), sid: str = Query("", max_length=64),
                as_: str = Query("", alias="as"), user: User = Depends(auth.current_user)):
-    rt = _hub_rt(user, machine)
-    out = rt.hub.status(sid)
+    rt = _screen_rt(user, machine)
+    if rt.hub is None:
+        return authz.vnc_status(_closed_screen_status(rt), _hide(user, as_))
+    out = {"open": True, **rt.hub.status(sid)}
     if rt.bridge is not None:  # Beckhoff: estado da ponte CERHost (o que falta, se conectou)
         out["bridge"] = {"state": rt.bridge.state, "error": rt.bridge.error}
     return authz.vnc_status(out, _hide(user, as_))
@@ -551,18 +567,21 @@ def vnc_status(machine: int = Query(...), sid: str = Query("", max_length=64),
 
 @app.post("/api/vnc/control")
 async def vnc_control(body: VncControl, machine: int = Query(...), user: User = Depends(auth.current_user)):
-    rt = _hub_rt(user, machine)
-    hub = rt.hub
+    rt = _screen_rt(user, machine)
     if body.action == "take":
         problem = authz.control_problem(user, rt.machine, _fleet().accounts.active_grant(rt.machine.id))
         if problem:
             raise HTTPException(403, problem)
+        hub = rt.hub
+        if hub is None:
+            raise HTTPException(409, "A tela ao vivo não está aberta. Recarregue a Tela ao vivo.")
         ok, msg = await hub.take(body.sid)
         if not ok:
             raise HTTPException(403 if "visualizacao" in msg or "desligada" in msg else 409, msg)
         return {"ok": True, "message": msg}
     if body.action == "release":
-        return {"ok": await hub.release(body.sid, "liberado pelo operador")}
+        hub = rt.hub
+        return {"ok": hub is not None and await hub.release(body.sid, "liberado pelo operador")}
     raise HTTPException(400, "acao invalida")
 
 

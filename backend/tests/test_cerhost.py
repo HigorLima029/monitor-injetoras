@@ -158,7 +158,7 @@ SEQ = [["windowfocus", "--sync", MAIN_WID], ["key", "alt+f"], ["key", "Return"],
        ["type", "--delay", "50", HOST], ["key", "Return"]]
 
 
-def make_bridge(tmp_path, monkeypatch, control=CONTROL, runner=None, **kw):
+def make_bridge(tmp_path, monkeypatch, control=CONTROL, runner=None, view=VIEW, **kw):
     exe = tmp_path / "CERHOST.exe"
     exe.write_bytes(b"MZ")
     monkeypatch.setattr(cerhost.shutil, "which", lambda name: f"/usr/bin/{name}")
@@ -166,7 +166,7 @@ def make_bridge(tmp_path, monkeypatch, control=CONTROL, runner=None, **kw):
     x11 = tmp_path / "x11"
     x11.mkdir(exist_ok=True)
     runner = runner or FakeRunner()
-    b = CerhostBridge(HOST, 99, str(exe), VIEW, control, runner=runner,
+    b = CerhostBridge(HOST, 99, str(exe), view, control, runner=runner,
                       wineprefix=kw.pop("wineprefix", ""))
     b.x11_tmp = str(x11)
     b.watch_interval = 3600  # nos testes o vigia roda a mao com check()
@@ -302,6 +302,34 @@ def test_senhas_fora_da_linha_de_comando(tmp_path, monkeypatch):
     asyncio.run(go2())
     assert "-viewonly" in runner2.procs("x11vnc")[0].argv
     assert runner2.passwd[0][0].splitlines() == [VIEW]
+
+
+def test_ponte_sem_senha_gera_as_proprias_fora_do_argv(tmp_path, monkeypatch, caplog):
+    b, runner = make_bridge(tmp_path, monkeypatch, view="", control="")
+    view, control = b.view_password, b.control_password
+    assert len(view) == 8 and len(control) == 8 and view != control
+    assert all(c.isalnum() for c in view + control)
+    outra, _ = make_bridge(tmp_path, monkeypatch, view="", control="")
+    assert (outra.view_password, outra.control_password) != (view, control)
+
+    async def go():
+        with caplog.at_level(logging.DEBUG):
+            await b.start()
+            assert b.state == "connected", b.error
+            await b.stop()
+
+    asyncio.run(go())
+    for argv in runner.all_argv():
+        assert not any(view in a or control in a for a in argv), argv
+    vnc = runner.procs("x11vnc")[0].argv
+    assert "-localhost" in vnc and "-viewonly" not in vnc
+    assert vnc[vnc.index("-passwdfile") + 1].startswith("rm:")
+    assert runner.passwd[0][0].splitlines() == [control, "__BEGIN_VIEWONLY__", view]
+    assert view not in caplog.text and control not in caplog.text
+    assert view not in repr(b) and control not in repr(b)
+    # senhas recebidas continuam valendo (sem gerar nada)
+    c, _ = make_bridge(tmp_path, monkeypatch)
+    assert (c.view_password, c.control_password) == (VIEW, CONTROL)
 
 
 def test_sem_senha_de_visualizacao_nao_sobe(tmp_path, monkeypatch):

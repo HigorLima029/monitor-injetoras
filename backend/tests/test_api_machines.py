@@ -247,6 +247,7 @@ class _MissingBridge:
 
     def __init__(self, m):
         self.state, self.error, self.port = "stopped", None, None
+        self.view_password, self.control_password = "gerada1", "gerada2"
 
     async def start(self):
         self.state = "missing"
@@ -274,20 +275,49 @@ def test_status_mostra_falta_de_ferramenta(tmp_path, client_as):
         client = client_as("mae")
         info = client.get(f"/api/machines/{m}/info").json()
         assert info["vnc"] is True and info["vnc_control"] is True
-        for _ in range(100):  # a ponte sobe em segundo plano
-            r = client.get("/api/vnc/status", params={"machine": m})
-            if r.json().get("bridge", {}).get("state") == "missing":
-                break
-            time.sleep(0.01)
+        st = client.get("/api/vnc/status", params={"machine": m}).json()
+        assert st["open"] is False and st["bridge"]["state"] == "stopped"  # a tela é sob demanda
+        assert st["panel"]["state"] == "idle"
+        with client.websocket_connect(f"/ws/vnc?machine={m}") as ws:  # abre a tela (e a ponte)
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_bytes()
+        assert exc.value.code == 1008 and "falta no servidor" in exc.value.reason
+        r = client.get("/api/vnc/status", params={"machine": m})
         assert r.status_code == 200
         st = r.json()
         assert st["bridge"]["state"] == "missing"
         assert "x11vnc" in st["bridge"]["error"] and "CERHOST.exe" in st["bridge"]["error"]
         assert "SEGREDO" not in r.text
-        with client.websocket_connect(f"/ws/vnc?machine={m}") as ws:
+    finally:
+        del main.app.state.fleet
+
+
+class _SlowBridge(_MissingBridge):
+    """Ponte que fica subindo (ocupa uma tela da Beckhoff)."""
+
+    async def start(self):
+        self.state = "starting"
+
+
+def test_ws_vnc_acima_do_limite_fecha_com_1013(tmp_path, client_as):
+    from app.sources import SimulatedSource
+    store = MachineStore(str(tmp_path / "m.db"))
+    ids = [store.add(Machine(None, f"Bk{i}", "ads", "10.0.0.7", ams_net_id="5.79.97.240.1.1",
+                             vnc_enabled=True)).id for i in range(2)]
+    cfg = _settings(tmp_path)
+    cfg.cerhost_max_screens = 1
+    fleet = main.app.state.fleet = Fleet(store, cfg, source_factory=lambda _m: SimulatedSource(),
+                                         bridge_factory=_SlowBridge)
+    try:
+        client = client_as("mae")
+        client.portal.call(fleet.open_screen, ids[0])
+        with client.websocket_connect(f"/ws/vnc?machine={ids[1]}") as ws:
             with pytest.raises(WebSocketDisconnect) as exc:
                 ws.receive_bytes()
-        assert exc.value.code == 1008 and "falta no servidor" in exc.value.reason
+        assert exc.value.code == 1013
+        assert exc.value.reason == ("Limite de telas da Beckhoff abertas ao mesmo tempo. "
+                                    "Tente de novo em alguns minutos.")
+        assert fleet.runtime(ids[1]).viewers == 0 and fleet.runtime(ids[1]).hub is None
     finally:
         del main.app.state.fleet
 
@@ -484,7 +514,11 @@ def test_ws_fecha_quando_maquina_sai_do_cliente(multi):
 
 def test_controle_da_tela_por_perfil(multi):
     cli = multi.client_as("cliente", multi.ca)
-    assert main.app.state.fleet.runtime(multi.ma).hub is not None
+    fleet = main.app.state.fleet
+    assert fleet.runtime(multi.ma).hub is None  # tela fechada: o perfil é conferido antes
+    r = cli.post(f"/api/vnc/control?machine={multi.ma}", json={"sid": "x", "action": "take"})
+    assert r.status_code == 403 and r.json()["detail"] == "Cliente só visualiza a tela."
+    assert cli.portal.call(fleet.open_screen, multi.ma) is fleet.runtime(multi.ma).hub
     r = cli.post(f"/api/vnc/control?machine={multi.ma}", json={"sid": "x", "action": "take"})
     assert r.status_code == 403 and r.json()["detail"] == "Cliente só visualiza a tela."
     tec = multi.client_as("tecnico")
@@ -594,7 +628,7 @@ def test_cliente_nunca_ve_ip_nem_porta(offline):
         msg = ws.receive_json()
         texts.append(str(msg))
         assert msg["status"]["last_error"] == "Sem conexão com a máquina."
-    hub = fleet.runtime(offline.ma).hub
+    hub = cli.portal.call(fleet.open_screen, offline.ma)
     hub.state, hub.error = "error", "painel 10.1.1.1:5911: ConnectionRefusedError"
     hub.controller = SimpleNamespace(peer="192.168.77.7", control_since=time.time(),
                                      last_input=time.monotonic())
@@ -627,16 +661,13 @@ def test_cliente_nao_ve_erro_da_ponte(tmp_path, client_as, accounts):
                                  bridge_factory=_MissingBridge)
     try:
         cli = client_as("cliente", ca)
-        for _ in range(100):
-            st = cli.get("/api/vnc/status", params={"machine": m}).json()
-            if st["bridge"]["state"] == "missing":
-                break
-            time.sleep(0.01)
-        assert st["bridge"]["error"] == "Tela indisponível no momento."
         with cli.websocket_connect(f"/ws/vnc?machine={m}") as ws:
             with pytest.raises(WebSocketDisconnect) as exc:
                 ws.receive_bytes()
         assert exc.value.code == 1008 and exc.value.reason == "Tela indisponível no momento."
+        st = cli.get("/api/vnc/status", params={"machine": m}).json()
+        assert st["bridge"]["state"] == "missing"
+        assert st["bridge"]["error"] == "Tela indisponível no momento."
     finally:
         del main.app.state.fleet
 

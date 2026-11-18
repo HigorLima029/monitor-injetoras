@@ -37,6 +37,7 @@ import secrets
 import shutil
 import signal
 import socket
+import string
 import struct
 import sys
 import tempfile
@@ -64,6 +65,14 @@ def missing_tools(cerhost_exe: str) -> list[str]:
     if not cerhost_exe or not os.path.isfile(cerhost_exe):
         missing.append("CERHOST.exe")
     return missing
+
+
+_ALPHABET = string.ascii_letters + string.digits
+PASSWORD_LEN = 8  # o VNC usa so os 8 primeiros caracteres
+
+
+def _random_password() -> str:
+    return "".join(secrets.choice(_ALPHABET) for _ in range(PASSWORD_LEN))
 
 
 def _port_free(port: int) -> bool:
@@ -198,18 +207,24 @@ class CerhostBridge:
 
     proc_root = "/proc"      # onde ler o cmdline das sobras (os testes trocam)
 
-    def __init__(self, host: str, display: int, cerhost_exe: str, view_password: str,
+    def __init__(self, host: str, display: int, cerhost_exe: str, view_password: str = "",
                  control_password: str = "", runner=None, wineprefix: str = "",
                  pidfile: str = "") -> None:
         self.host = host
         self.display = display
         self.cerhost_exe = cerhost_exe
-        self.view_password = view_password
-        self.control_password = control_password
+        # Sem senhas recebidas, a ponte gera as suas: o x11vnc so escuta em 127.0.0.1 e quem
+        # liga nele e o hub, que le estas propriedades. Nunca vao para argv nem para o log.
+        if not view_password and not control_password:
+            view_password, control_password = _random_password(), _random_password()
+        elif not view_password:
+            view_password = _random_password()
+        self._view_password = view_password
+        self._control_password = control_password
         # prefixo Wine DEDICADO (opcional): so com ele o stop roda `wineserver -k`
         self.wineprefix = wineprefix
         self.runner = runner or SubprocessRunner()
-        # arquivo de pids (ex.: data/cerhost.pids): as sobras de um Monitor que caiu feio
+        # arquivo de pids desta tela virtual (ex.: data/cerhost_99.pids): as sobras de um Monitor que caiu feio
         self.pidfile = pidfile
         self.state = "stopped"
         self.error: str | None = None
@@ -224,6 +239,25 @@ class CerhostBridge:
         self._not_before = 0.0
         self._last_port: int | None = None
         self._reported: set[int] = set()  # pids cuja morte ja foi para o log
+
+    def __repr__(self) -> str:  # sem as senhas
+        return f"<CerhostBridge {self.host} :{self.display} {self.state}>"
+
+    @property
+    def view_password(self) -> str:
+        return self._view_password
+
+    @view_password.setter
+    def view_password(self, value: str) -> None:
+        self._view_password = value
+
+    @property
+    def control_password(self) -> str:
+        return self._control_password
+
+    @control_password.setter
+    def control_password(self, value: str) -> None:
+        self._control_password = value
 
     # ------------------------------------------------------------------ ciclo de vida
     @property

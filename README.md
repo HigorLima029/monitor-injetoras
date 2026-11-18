@@ -124,23 +124,31 @@ sudo apt-get install -y wine wine32:i386 xvfb openbox xdotool wmctrl x11vnc
 No `.env`:
 
 - `CERHOST_EXE=` caminho do `CERHOST.exe` (sem padrão; vazio = tela da Beckhoff desligada, com aviso).
-- `CERHOST_DISPLAY=99` número da tela virtual (Xvfb `:99`).
+- `CERHOST_DISPLAY=99` número da primeira tela virtual (Xvfb `:99`). Cada tela da Beckhoff
+  aberta usa a sua, a menor livre a partir daí (`:99`, `:100`, ...).
+- `CERHOST_MAX_SCREENS=2` quantas telas da Beckhoff podem estar abertas ao mesmo tempo (cada uma
+  é um Wine + Xvfb + x11vnc no servidor). Acima disso, quem abrir vê "Limite de telas da Beckhoff
+  abertas ao mesmo tempo. Tente de novo em alguns minutos." (WebSocket fechado com código 1013).
+- `SCREEN_IDLE_SECONDS=120` tela ao vivo sem ninguém assistindo por esse tempo é fechada (na
+  Beckhoff, a ponte é encerrada e a tela virtual liberada); abre de novo quando alguém voltar.
 - `CERHOST_SCREEN=1920x1920x24` tamanho da tela virtual. O CERHost se ajusta sozinho ao tamanho do painel
   e só a janela dele é transmitida. Modo antigo (tela justa e janela maximizada): `CERHOST_SCREEN=800x1000x24`
   e `CERHOST_MAXIMIZE=1`.
 - `CERHOST_WINEPREFIX=` prefixo Wine dedicado ao CERHost (opcional). Com ele, ao encerrar a
   ponte roda `wineserver -k` só nesse prefixo; vazio = usa o prefixo herdado e nunca roda
   `wineserver -k`.
-- `CERHOST_PIDFILE=data/cerhost.pids` onde a ponte anota os pids dos processos que abriu (para
-  limpar as sobras se o Monitor cair sem desligar a ponte).
+- `CERHOST_PIDFILE=data/cerhost.pids` define a pasta onde cada ponte anota os pids dos processos
+  que abriu, um arquivo por tela virtual (`data/cerhost_99.pids`, `data/cerhost_100.pids`...), para
+  limpar as sobras se o Monitor cair sem desligar a ponte.
 
 No cadastro da máquina `ads` (página **Máquinas**), **ligue a Tela ao vivo** (vem desligada na
-Beckhoff) e defina as duas senhas VNC: a de visualização (obrigatória) e a de operação (vazia =
-ninguém opera). Elas valem só entre o Monitor e o x11vnc local, até 8 caracteres. A porta VNC do
-cadastro não é usada na Beckhoff: o servidor escolhe a porta local.
+Beckhoff). As senhas VNC do cadastro são opcionais: sem elas, a ponte gera as suas (8 caracteres
+aleatórios, nunca na linha de comando nem no log). Elas valem só entre o Monitor e o x11vnc local.
+A porta VNC do cadastro não é usada na Beckhoff: o servidor escolhe a porta local.
 
-A ponte só existe enquanto a Beckhoff é a máquina aberta; ao trocar, tudo é encerrado. Ela sobe
-em segundo plano (os dados ADS aparecem na hora; a tela, quando o CERHost conectar) e reconecta
+A ponte só existe enquanto alguém tem a tela da Beckhoff aberta (fecha `SCREEN_IDLE_SECONDS`
+depois que o último sai). Ela sobe em segundo plano (a tela aparece quando o CERHost conectar;
+os dados ADS são coletados o tempo todo, com ou sem tela) e reconecta
 sozinha se o CERHost cair. O robô de teclado (xdotool) só digita o IP no diálogo de conexão,
 **antes** de conectar, com o VNC desligado; depois disso nada é enviado à tela além do que o
 operador fizer. Faltando alguma ferramenta ou o `CERHOST.exe`, o Monitor sobe normal, os dados
@@ -149,16 +157,16 @@ ADS seguem e a Tela ao vivo diz o que falta (`GET /api/vnc/status` traz `bridge.
 
 Se o CERHost, o Xvfb, o Openbox ou o x11vnc morrer sozinho, o log do Monitor mostra qual foi, o
 código de saída e as últimas linhas do que ele escreveu. Os processos da ponte morrem junto com o
-Monitor e ficam anotados em `data/cerhost.pids` (`CERHOST_PIDFILE`): se o Monitor cair feio
+Monitor e ficam anotados em `data/cerhost_<tela>.pids` (pasta do `CERHOST_PIDFILE`): se o Monitor cair feio
 (`kill -9`, falta de memória), a próxima subida encerra as sobras dele antes de abrir a tela.
 Se mesmo assim sobrar algo (a Tela ao vivo diz "a tela virtual :99 já está em uso"), com o
 Monitor parado:
 
 ```bash
-pkill -f 'x11vnc -display :99'; pkill -if 'cerhost\.exe'; pkill -f 'Xvfb :99'; rm -f data/cerhost.pids
+pkill -f 'x11vnc -display :99'; pkill -if 'cerhost\.exe'; pkill -f 'Xvfb :99'; rm -f data/cerhost_99.pids
 ```
 
-(troque `:99` pelo `CERHOST_DISPLAY`; o Openbox da tela virtual sai sozinho quando o Xvfb sai.
+(troque `:99` pela tela da mensagem; o Openbox da tela virtual sai sozinho quando o Xvfb sai.
 Com `CERHOST_WINEPREFIX`, rode também `WINEPREFIX=<prefixo> wineserver -k`.)
 
 ## Máquinas
@@ -273,9 +281,11 @@ Esqueceu a senha ou perdeu o celular? Use `resetar-senha --usuario LOGIN` ou
 | `ADS_LOCAL_NET_ID` | vazio | AMS Net ID deste servidor (máquinas `ads`) |
 | `VNC_AUDIT_PATH` | `data/vnc_audit.log` | Registro de quem entrou e operou |
 | `CERHOST_EXE` | vazio | Caminho do `CERHOST.exe` (tela da Beckhoff; vazio = desligada) |
-| `CERHOST_DISPLAY` | `99` | Tela virtual (Xvfb) da ponte CERHost |
+| `CERHOST_DISPLAY` | `99` | Primeira tela virtual (Xvfb) das pontes CERHost (uma por tela aberta) |
+| `CERHOST_MAX_SCREENS` | `2` | Telas da Beckhoff abertas ao mesmo tempo |
+| `SCREEN_IDLE_SECONDS` | `120` | Segundos sem ninguém até a tela ao vivo fechar (e a ponte sair) |
 | `CERHOST_WINEPREFIX` | vazio | Prefixo Wine dedicado ao CERHost (opcional) |
-| `CERHOST_PIDFILE` | `data/cerhost.pids` | Pids da ponte CERHost (limpa as sobras se o Monitor cair) |
+| `CERHOST_PIDFILE` | `data/cerhost.pids` | Pasta dos pids das pontes (`cerhost_<tela>.pids`; limpa as sobras se o Monitor cair) |
 
 ## API
 
