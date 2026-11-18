@@ -183,3 +183,16 @@ def test_migracao_do_cadastro_antigo(tmp_path):
     migrate_machine_clients(ms, acc)
     assert ms.get(n.id).client_id is None
     ms.close(); acc.close()
+
+
+def test_minutos_invalidos(acc, cliente):
+    for m in (0, -5, 481, 1.5, "30", True):
+        with pytest.raises(ValueError, match="Duração"):
+            acc.grant_support(1, cliente, minutes=m)
+    assert acc.grant_support(1, cliente, minutes=480, now=0).expires == 480 * 60
+
+
+def test_update_user_nome_vazio(acc, cliente):
+    with pytest.raises(ValueError, match="Nome vazio"):
+        acc.update_user(cliente.id, name="  ")
+    assert acc.get_user(cliente.id).name == "Ana"

@@ -118,7 +118,7 @@ class MachineStore:
     def __init__(self, path: str):
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
         self._conn.executescript(SCHEMA)
         cols = {r[1] for r in self._conn.execute("PRAGMA table_info(machines)")}
         if "client_id" not in cols:  # banco criado antes das contas

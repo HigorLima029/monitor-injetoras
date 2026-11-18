@@ -120,7 +120,9 @@ class AccountStore:
     def __init__(self, path: str):
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self._conn = sqlite3.connect(path, check_same_thread=False)
+        self._conn = sqlite3.connect(path, check_same_thread=False, timeout=10)
+        if path != ":memory:":
+            self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.executescript(SCHEMA)
         self._lock = threading.Lock()
 
@@ -214,25 +216,29 @@ class AccountStore:
 
     def update_user(self, id: int, *, name: str | None = None, active: bool | None = None,
                     client_id: int | None = None, role: str | None = None) -> User:
-        cur = self.get_user(id)
-        if cur is None:
-            raise KeyError(id)
-        if cur.role == "mae" and (active is False or (role is not None and role != "mae")):
-            raise PermissionError(MAE_PROTEGIDA)
-        new_role = cur.role if role is None else role
-        new_client = cur.client_id if client_id is None else client_id
-        if role is not None and role != "cliente" and client_id is None:
-            new_client = None  # deixou de ser cliente
-        self._check_role(new_role, new_client)
-        if new_client is not None and self.get_client(new_client) is None:
-            raise ValueError("Cliente não encontrado.")
-        new_active = cur.active if active is None else bool(active)
+        if name is not None and not name.strip():
+            raise ValueError("Nome vazio.")
         with self._lock, self._conn:
+            r = self._conn.execute(f"SELECT {_USER_COLS} FROM users WHERE id=?", (id,)).fetchone()
+            if r is None:
+                raise KeyError(id)
+            cur = _user(r)
+            if cur.role == "mae" and (active is False or (role is not None and role != "mae")):
+                raise PermissionError(MAE_PROTEGIDA)
+            new_role = cur.role if role is None else role
+            new_client = cur.client_id if client_id is None else client_id
+            if role is not None and role != "cliente" and client_id is None:
+                new_client = None  # deixou de ser cliente
+            self._check_role(new_role, new_client)
+            if new_client is not None and not self._conn.execute(
+                    "SELECT 1 FROM clients WHERE id=?", (new_client,)).fetchone():
+                raise ValueError("Cliente não encontrado.")
+            new_active = cur.active if active is None else bool(active)
             self._conn.execute(
                 "UPDATE users SET name=?, active=?, client_id=?, role=? WHERE id=?",
-                ((cur.name if name is None else name.strip()), int(new_active), new_client, new_role, id))
-        if not new_active:
-            self.delete_user_sessions(id)
+                (cur.name if name is None else name.strip(), int(new_active), new_client, new_role, id))
+            if not new_active:
+                self._conn.execute("DELETE FROM sessions WHERE user_id=?", (id,))
         return self.get_user(id)
 
     def set_password(self, id: int, pw: str) -> None:
@@ -309,6 +315,8 @@ class AccountStore:
     def grant_support(self, machine_id: int, by: User, minutes: int = 30, on_behalf: bool = False,
                       reason: str = "", now: float | None = None) -> Grant:
         reason = (reason or "").strip()
+        if not isinstance(minutes, int) or isinstance(minutes, bool) or not 1 <= minutes <= 480:
+            raise ValueError("Duração da autorização inválida.")
         if on_behalf and not reason:
             raise ValueError("Informe o motivo para autorizar em nome do cliente.")
         now = time.time() if now is None else now

@@ -8,6 +8,7 @@ import logging
 import time
 from pathlib import Path
 
+from .accounts import AccountStore
 from .cerhost import CerhostBridge
 from .collector import Collector
 from .em63 import Em63Source
@@ -31,6 +32,7 @@ class MachineManager:
         self.settings = settings
         self.source_factory = source_factory  # testes: fábrica(machine) -> fonte
         self.bridge_factory = bridge_factory  # testes: fábrica(machine) -> ponte (sem Wine/Xvfb)
+        self.accounts: AccountStore | None = None  # definido em build_manager
         self.machine: Machine | None = None
         self.collector: Collector | None = None
         self.hub: VncHub | None = None

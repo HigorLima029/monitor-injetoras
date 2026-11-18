@@ -274,3 +274,11 @@ def test_status_da_br_sem_ponte(api):
     client.post(f"/api/machines/{m.id}/activate")
     st = client.get("/api/vnc/status").json()
     assert "bridge" not in st and "panel" in st
+
+
+def test_put_client_id_null_limpa_cliente(api):
+    client, store, a, b = api
+    assert client.put(f"/api/machines/{b}", json={"client_id": 5}).json()["client_id"] == 5
+    r = client.put(f"/api/machines/{b}", json={"client_id": None})
+    assert r.status_code == 200 and r.json()["client_id"] is None
+    assert store.get(b).client_id is None

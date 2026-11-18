@@ -13,9 +13,9 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .accounts import AccountStore, migrate_machine_clients
 from .collector import Collector, to_number
 from .config import settings
-from .accounts import AccountStore, migrate_machine_clients
 from .machines import CONNECTION_FIELDS, Machine, MachineStore, seed_from_settings
 from .manager import MachineManager
 from .vnc_hub import VncHub, WebSocketTransport
@@ -36,6 +36,13 @@ def build_manager() -> MachineManager:
     return manager
 
 
+def _client_name(mgr: MachineManager, client_id: int | None) -> str:
+    if mgr.accounts is None or client_id is None:
+        return ""
+    c = mgr.accounts.get_client(client_id)
+    return c.name if c else ""
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     manager = getattr(app.state, "manager", None) or build_manager()
@@ -44,9 +51,8 @@ async def lifespan(app: FastAPI):
     yield
     await manager.stop()
     manager.store.close()
-    accounts = getattr(manager, "accounts", None)
-    if accounts is not None:
-        accounts.close()
+    if manager.accounts is not None:
+        manager.accounts.close()
 
 
 app = FastAPI(title="Monitor de Injetoras", lifespan=lifespan)
@@ -195,8 +201,7 @@ def info():
         "machine_id": m.id,
         "kind": m.kind,
         "client_id": m.client_id,
-        "client": (lambda a, c: a.get_client(c).name if a and c and a.get_client(c) else "")(
-            getattr(mgr, "accounts", None), m.client_id),
+        "client": _client_name(mgr, m.client_id),
         "machine_name": m.name,
         "opcua_url": f"ads://{m.host}" if m.kind == "ads" else m.opcua_url,
         "simulate": demo,
