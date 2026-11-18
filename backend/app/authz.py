@@ -52,3 +52,50 @@ def machine_view(user: User, machine: Machine, status: dict, client_name: str, *
             "vnc": machine.effective_vnc_enabled and machine.kind != "demo",
         }
     return {**machine.public(), "client_name": client_name, "status": status}
+
+
+# ---- textos sem dados de conexão (cliente e "ver como o cliente") ------------------
+SEM_CONEXAO = "Sem conexão com a máquina."
+TELA_INDISPONIVEL = "Tela indisponível no momento."
+EM_ATENDIMENTO = "Técnico em atendimento"
+
+
+def hides_connection(user: User, as_client: bool = False) -> bool:
+    return as_client or not sees_connection(user)
+
+
+def collector_status(status: dict, hide: bool) -> dict:
+    """`Collector.status()` para o usuário: o erro da conexão traz IP e porta da máquina."""
+    if not hide or not status.get("last_error"):
+        return status
+    return {**status, "last_error": SEM_CONEXAO}
+
+
+def live_payload(payload: dict, hide: bool) -> dict:
+    """Mensagem do coletor (`live()`, `/values`): o mesmo, com o status filtrado."""
+    if not hide or "status" not in payload:
+        return payload
+    return {**payload, "status": collector_status(payload["status"], True)}
+
+
+def vnc_status(status: dict, hide: bool) -> dict:
+    """`VncHub.status()` (+ `bridge`) para o usuário: sem erros do painel/ponte (IP, porta,
+    ferramentas do servidor), sem o IP de quem opera e sem o registro."""
+    if not hide:
+        return status
+    out = dict(status)
+    panel = dict(out.get("panel") or {})
+    if panel.get("error"):
+        panel["error"] = TELA_INDISPONIVEL
+    out["panel"] = panel
+    if out.get("bridge"):
+        b = dict(out["bridge"])
+        if b.get("error"):
+            b["error"] = TELA_INDISPONIVEL
+        out["bridge"] = b
+    if out.get("controller"):
+        c = {k: v for k, v in out["controller"].items() if k != "peer"}
+        c["label"] = EM_ATENDIMENTO
+        out["controller"] = c
+    out.pop("events", None)
+    return out

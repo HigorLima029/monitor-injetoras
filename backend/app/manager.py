@@ -50,6 +50,7 @@ class MachineRuntime:
         self.version = 0
         self.closed = False
         self._idle_since: float | None = None  # None = ainda tem gente (ou nunca teve: ocioso)
+        self._touched: float | None = None  # último pedido de valores (telas que perguntam por HTTP)
 
     @property
     def fast_seconds(self) -> float:
@@ -66,8 +67,10 @@ class MachineRuntime:
     def wanted_poll(self) -> float:
         if self.viewers > 0:
             return self.fast_seconds
-        if self._idle_since is not None and self.clock() - self._idle_since < self.linger_seconds:
-            return self.fast_seconds
+        now = self.clock()
+        for since in (self._idle_since, self._touched):
+            if since is not None and now - since < self.linger_seconds:
+                return self.fast_seconds
         return self.idle_seconds
 
     def tick(self) -> None:
@@ -78,6 +81,11 @@ class MachineRuntime:
     def enter(self) -> None:
         self.viewers += 1
         self._idle_since = None
+        self.tick()
+
+    def touch(self) -> None:
+        """Alguém pediu dados por HTTP (ex.: `/values`): conta como olhando por `linger` segundos."""
+        self._touched = self.clock()
         self.tick()
 
     def leave(self) -> None:
@@ -124,8 +132,9 @@ class Fleet:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._tick_task
             self._tick_task = None
-        for mid in list(self._runtimes):
-            await self.remove(mid)
+        # juntas: N máquinas travadas fecham no tempo de uma, não N vezes o limite
+        await asyncio.gather(*(self.remove(mid) for mid in list(self._runtimes)),
+                             return_exceptions=True)
 
     def runtime(self, machine_id: int) -> MachineRuntime | None:
         return self._runtimes.get(machine_id)
@@ -149,28 +158,37 @@ class Fleet:
     async def add(self, machine_id: int) -> MachineRuntime | None:
         """Abre a máquina recém-cadastrada (ou já aberta: devolve a atual). Falha não derruba nada."""
         async with self._lock(machine_id):
-            rt = self._runtimes.get(machine_id)
-            if rt is not None:
-                return rt
-            m = self.store.get(machine_id)
-            if m is None:
-                return None
-            rt = MachineRuntime(m, self.settings, self.clock)
-            try:
-                await self._open(rt)
-            except Exception:  # o servidor (e as outras máquinas) seguem sem esta
-                log.exception("falha ao abrir a máquina %s (id %s)", m.name, m.id)
-                return None
-            self._runtimes[machine_id] = rt
-            log.info("máquina aberta: %s (id %s)", m.name, m.id)
+            return await self._add_locked(machine_id)
+
+    async def _add_locked(self, machine_id: int) -> MachineRuntime | None:
+        rt = self._runtimes.get(machine_id)
+        if rt is not None:
             return rt
+        m = self.store.get(machine_id)
+        if m is None:
+            return None
+        rt = MachineRuntime(m, self.settings, self.clock)
+        try:
+            await self._open(rt)
+        except Exception:  # o servidor (e as outras máquinas) seguem sem esta
+            log.exception("falha ao abrir a máquina %s (id %s)", m.name, m.id)
+            return None
+        self._runtimes[machine_id] = rt
+        log.info("máquina aberta: %s (id %s)", m.name, m.id)
+        return rt
 
     async def reload(self, machine_id: int, connection_changed: bool) -> None:
-        """Cadastro mudou. Só conexão (IP, portas, tipo, senhas) reabre; nome/cliente/notas só atualizam."""
+        """Cadastro mudou. Só conexão (IP, portas, tipo, senhas) reabre; nome/cliente/notas só atualizam.
+
+        Máquina que não abriu (na subida, no cadastro ou num reload anterior) tenta abrir de novo:
+        é assim que corrigir o cadastro faz a coleta voltar."""
         async with self._lock(machine_id):
             rt = self._runtimes.get(machine_id)
             m = self.store.get(machine_id)
-            if rt is None or m is None:
+            if m is None:
+                return
+            if rt is None:
+                await self._add_locked(machine_id)
                 return
             rt.machine = m
             if not connection_changed:

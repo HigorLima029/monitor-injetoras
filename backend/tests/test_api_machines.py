@@ -211,15 +211,16 @@ def test_put_none_em_obrigatorio_e_422(api):
         assert client.put(f"/api/machines/{b}", json={campo: None}).status_code == 422
 
 
-def test_put_sem_mudar_conexao_nao_reabre(api):
+def test_put_sem_mudar_conexao_nao_reabre(api, accounts):
     client, store, a, b = api
+    cid = accounts.add_client("Cliente X").id
     rt = main.app.state.fleet.runtime(a)
     antes, outra = rt.collector, main.app.state.fleet.runtime(b).collector
-    r = client.put(f"/api/machines/{a}", json={"name": "A renomeada", "notes": "x", "client_id": 5})
+    r = client.put(f"/api/machines/{a}", json={"name": "A renomeada", "notes": "x", "client_id": cid})
     assert r.status_code == 200
     assert rt.collector is antes
     info = client.get(f"/api/machines/{a}/info").json()
-    assert info["machine_name"] == "A renomeada" and info["client_id"] == 5
+    assert info["machine_name"] == "A renomeada" and info["client_id"] == cid
     client.put(f"/api/machines/{a}", json={"host": "127.0.0.9"})
     assert rt.collector is not antes
     assert main.app.state.fleet.runtime(b).collector is outra  # a outra máquina nem percebeu
@@ -310,9 +311,10 @@ def test_status_da_br_sem_ponte(api):
     assert "bridge" not in st and "panel" in st
 
 
-def test_put_client_id_null_limpa_cliente(api):
+def test_put_client_id_null_limpa_cliente(api, accounts):
     client, store, a, b = api
-    assert client.put(f"/api/machines/{b}", json={"client_id": 5}).json()["client_id"] == 5
+    cid = accounts.add_client("Cliente X").id
+    assert client.put(f"/api/machines/{b}", json={"client_id": cid}).json()["client_id"] == cid
     r = client.put(f"/api/machines/{b}", json={"client_id": None})
     assert r.status_code == 200 and r.json()["client_id"] is None
     assert store.get(b).client_id is None
@@ -538,3 +540,185 @@ def test_authz_machine_view():
     full = authz.machine_view(_u("mae"), m, st, "Cli")
     assert full["host"] == "10.0.0.1" and full["client_name"] == "Cli" and full["status"] == st
     assert "vnc_view_password" not in full
+
+
+# ---- revisão: sem IP em erros, cliente válido, WebSocket atento -------------------
+class _Unreachable:
+    """Fonte que nunca conecta, com o erro real do asyncio (traz IP e porta)."""
+
+    async def connect(self):
+        raise OSError("[Errno 111] Connect call failed ('10.1.1.1', 4840)")
+
+    async def list_tags(self):
+        return []
+
+    async def read(self, tags):
+        return {}
+
+    async def close(self):
+        pass
+
+
+@pytest.fixture
+def offline(tmp_path, client_as, accounts):
+    ca = accounts.add_client("Cliente A").id
+    store = MachineStore(str(tmp_path / "m.db"))
+    ma = store.add(Machine(None, "MA", "em63", "10.1.1.1", client_id=ca, vnc_port=5911,
+                           vnc_view_password="v", vnc_control_password="c")).id
+    main.app.state.fleet = Fleet(store, _settings(tmp_path), source_factory=lambda m: _Unreachable())
+    try:
+        yield SimpleNamespace(client_as=client_as, ca=ca, ma=ma)
+    finally:
+        del main.app.state.fleet
+
+
+def _wait_error(fleet, mid):
+    for _ in range(200):
+        if fleet.runtime(mid).collector.last_error:
+            return
+        time.sleep(0.01)
+    raise AssertionError("o coletor não registrou o erro")
+
+
+def test_cliente_nunca_ve_ip_nem_porta(offline):
+    cli = offline.client_as("cliente", offline.ca)
+    fleet = main.app.state.fleet
+    _wait_error(fleet, offline.ma)
+    base = f"/api/machines/{offline.ma}"
+    texts = [cli.get(base + rota).text for rota in ROTAS] + [cli.get("/api/machines").text]
+    live = cli.get(base + "/live").json()
+    assert live["status"]["last_error"] == "Sem conexão com a máquina."
+    assert cli.get(base + "/values", params={"tags": "x"}).json()["status"]["last_error"] == \
+        "Sem conexão com a máquina."
+    with cli.websocket_connect(f"/ws/machines/{offline.ma}") as ws:
+        msg = ws.receive_json()
+        texts.append(str(msg))
+        assert msg["status"]["last_error"] == "Sem conexão com a máquina."
+    hub = fleet.runtime(offline.ma).hub
+    hub.state, hub.error = "error", "painel 10.1.1.1:5911: ConnectionRefusedError"
+    hub.controller = SimpleNamespace(peer="192.168.77.7", control_since=time.time(),
+                                     last_input=time.monotonic())
+    st = cli.get("/api/vnc/status", params={"machine": offline.ma})
+    texts.append(st.text)
+    assert st.json()["panel"]["error"] == "Tela indisponível no momento."
+    assert st.json()["controller"]["label"] == "Técnico em atendimento"
+    for t in texts:
+        for leak in ("10.1.1.1", "4840", "5911", "192.168.77.7"):
+            assert leak not in t, (leak, t)
+    # a equipe continua vendo o erro real; com as=cliente, não
+    tec = offline.client_as("tecnico")
+    assert "10.1.1.1" in tec.get(base + "/live").json()["status"]["last_error"]
+    assert tec.get(base + "/live", params={"as": "cliente"}).json()["status"]["last_error"] == \
+        "Sem conexão com a máquina."
+    st = tec.get("/api/vnc/status", params={"machine": offline.ma}).json()
+    assert st["controller"]["peer"] == "192.168.77.7" and "10.1.1.1" in st["panel"]["error"]
+    st = tec.get("/api/vnc/status", params={"machine": offline.ma, "as": "cliente"}).text
+    assert "192.168.77.7" not in st and "10.1.1.1" not in st
+    hub.controller = None
+
+
+def test_cliente_nao_ve_erro_da_ponte(tmp_path, client_as, accounts):
+    from app.sources import SimulatedSource
+    ca = accounts.add_client("Cliente A").id
+    store = MachineStore(str(tmp_path / "m.db"))
+    m = store.add(Machine(None, "Beckhoff", "ads", "10.0.0.7", ams_net_id="5.79.97.240.1.1",
+                          client_id=ca, vnc_enabled=True, vnc_view_password="v")).id
+    main.app.state.fleet = Fleet(store, _settings(tmp_path), source_factory=lambda _m: SimulatedSource(),
+                                 bridge_factory=_MissingBridge)
+    try:
+        cli = client_as("cliente", ca)
+        for _ in range(100):
+            st = cli.get("/api/vnc/status", params={"machine": m}).json()
+            if st["bridge"]["state"] == "missing":
+                break
+            time.sleep(0.01)
+        assert st["bridge"]["error"] == "Tela indisponível no momento."
+        with cli.websocket_connect(f"/ws/vnc?machine={m}") as ws:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_bytes()
+        assert exc.value.code == 1008 and exc.value.reason == "Tela indisponível no momento."
+    finally:
+        del main.app.state.fleet
+
+
+def test_cliente_inexistente_ou_inativo_422(api, accounts):
+    client, store, a, b = api
+    body = {"name": "N", "kind": "demo", "host": "10.9.9.9"}
+    off = accounts.add_client("Inativo").id
+    accounts.update_client(off, active=False)
+    for cid in (999, off):
+        r = client.post("/api/machines", json={**body, "client_id": cid})
+        assert r.status_code == 422 and r.json()["detail"] == "Cliente não encontrado."
+        r = client.put(f"/api/machines/{a}", json={"client_id": cid})
+        assert r.status_code == 422 and r.json()["detail"] == "Cliente não encontrado."
+    assert store.get(a).client_id is None and len(store.list()) == 2
+
+
+def test_maquina_que_nao_abriu_volta_ao_corrigir(tmp_path, client_as):
+    from app.sources import SimulatedSource
+
+    def factory(m):
+        if m.host == "quebrado":
+            raise RuntimeError("não abre")
+        return SimulatedSource()
+
+    store = MachineStore(str(tmp_path / "m.db"))
+    a = store.add(Machine(None, "A", "demo", "quebrado")).id
+    main.app.state.fleet = Fleet(store, _settings(tmp_path), source_factory=factory)
+    try:
+        mae = client_as("mae")
+        assert main.app.state.fleet.runtime(a) is None
+        assert mae.get(f"/api/machines/{a}/live").status_code == 503
+        r = mae.post("/api/machines", json={"name": "B", "kind": "demo", "host": "quebrado"})
+        b = r.json()["id"]
+        assert r.status_code == 201 and main.app.state.fleet.runtime(b) is None
+        for mid in (a, b):
+            assert mae.put(f"/api/machines/{mid}", json={"host": "127.0.0.1"}).status_code == 200
+            assert main.app.state.fleet.runtime(mid) is not None
+            assert mae.get(f"/api/machines/{mid}/live").status_code == 200
+        # só o nome mudou numa máquina que não abriu: tenta abrir de novo também
+        store.update(a, {"host": "quebrado"})
+        main.app.state.fleet._runtimes.pop(a)
+        store.update(a, {"host": "127.0.0.1"})
+        assert mae.put(f"/api/machines/{a}", json={"name": "A2"}).status_code == 200
+        assert main.app.state.fleet.runtime(a) is not None
+    finally:
+        del main.app.state.fleet
+
+
+def test_ws_percebe_aba_fechada_com_maquina_offline(offline):
+    cli = offline.client_as("cliente", offline.ca)
+    rt = main.app.state.fleet.runtime(offline.ma)
+    with cli.websocket_connect(f"/ws/machines/{offline.ma}") as ws:
+        ws.receive_json()
+        assert rt.viewers == 1
+    for _ in range(100):  # sem leituras (offline): só a leitura do socket percebe o fechamento
+        if rt.viewers == 0:
+            break
+        time.sleep(0.01)
+    assert rt.viewers == 0
+
+
+def test_ws_fecha_quando_o_cliente_do_usuario_muda(multi, accounts, monkeypatch):
+    monkeypatch.setattr(main, "WS_RECHECK_SECONDS", 0.05)
+    cli = multi.client_as("cliente", multi.ca)
+    uid = cli.get("/api/me").json()["id"]
+    with cli.websocket_connect(f"/ws/machines/{multi.ma}") as ws:
+        assert "status" in ws.receive_json()
+        accounts.update_user(uid, client_id=multi.cb)
+        start = time.monotonic()
+        with pytest.raises(WebSocketDisconnect) as exc:
+            for _ in range(1000):
+                ws.receive_json()
+        assert exc.value.code == 4404 and time.monotonic() - start < 5
+
+
+def test_values_conta_como_olhando(api):
+    client, store, a, b = api
+    fleet = main.app.state.fleet
+    rt = fleet.runtime(a)
+    fleet.settings.idle_poll_seconds = 10
+    rt.tick()
+    assert rt.collector.poll_seconds == 10
+    client.get(f"/api/machines/{a}/values", params={"tags": "CycleMonitor"})
+    assert rt.collector.poll_seconds == 0.05

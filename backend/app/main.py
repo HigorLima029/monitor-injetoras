@@ -27,6 +27,8 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname
 NAO_ENCONTRADA = "Máquina não encontrada"
 SO_MAE = "Só a conta mãe pode fazer isso."
 SO_EQUIPE = "Só a conta mãe e os técnicos podem fazer isso."
+CLIENTE_NAO_ENCONTRADO = "Cliente não encontrado."
+WS_RECHECK_SECONDS = 5.0  # WebSocket de dados confere de novo se o usuário ainda vê a máquina
 SEM_COLETA = "A coleta desta máquina não abriu. Veja o registro do servidor."
 WS_NAO_ENCONTRADA = 4404
 
@@ -184,6 +186,7 @@ def list_machines(client_id: int | None = None, user: User = Depends(auth.curren
 @app.post("/api/machines", status_code=201)
 async def add_machine(body: MachineIn, request: Request, user: User = Depends(auth.current_user)):
     _require(user, "mae")
+    _check_client(body.client_id)
     fleet = _fleet()
     try:
         m = fleet.store.add(Machine(None, **body.model_dump()))
@@ -201,6 +204,8 @@ async def update_machine(id: int, body: MachineUpdate, request: Request,
     before = _machine_or_404(user, id)
     _require(user, "mae")
     changes = body.model_dump(exclude_unset=True)
+    if "client_id" in changes:
+        _check_client(changes["client_id"])
     try:
         m = fleet.store.update(id, changes)
     except KeyError:
@@ -224,6 +229,19 @@ async def delete_machine(id: int, request: Request, user: User = Depends(auth.cu
     _audit(request, user, m, f"apagou a máquina {m.name} ({_client_label(m)})")
     await fleet.remove(id)
     return Response(status_code=204)
+
+
+def _check_client(client_id: int | None) -> None:
+    if client_id is None:
+        return
+    c = _fleet().accounts.get_client(client_id)
+    if c is None or not c.active:
+        raise HTTPException(422, CLIENTE_NAO_ENCONTRADO)
+
+
+def _hide(user: User, as_: str = "") -> bool:
+    """Esconder dados de conexão: cliente sempre; equipe com `as=cliente`."""
+    return authz.hides_connection(user, as_ == "cliente")
 
 
 def _client_label(m: Machine) -> str:
@@ -290,8 +308,8 @@ def _zones(m: Machine, c: Collector):
 
 
 @app.get("/api/machines/{id}/live")
-def live(id: int, user: User = Depends(auth.current_user)):
-    return _c(user, id).live()
+def live(id: int, as_: str = Query("", alias="as"), user: User = Depends(auth.current_user)):
+    return authz.live_payload(_c(user, id).live(), _hide(user, as_))
 
 
 @app.get("/api/machines/{id}/history")
@@ -338,18 +356,20 @@ def alarms(id: int, hours: float = Query(24, ge=1, le=24 * 31), user: User = Dep
 
 @app.get("/api/machines/{id}/values")
 def values(id: int, tags: str = Query(..., description="tags separadas por vírgula"),
-           user: User = Depends(auth.current_user)):
+           as_: str = Query("", alias="as"), user: User = Depends(auth.current_user)):
     """Valores atuais de uma lista de tags (usado pelas telas do painel).
 
     As tags pedidas entram na leitura rápida por 30 s; assim a tela aberta
     atualiza a cada POLL_SECONDS em vez de esperar a leitura completa.
     """
-    c = _c(user, id)
+    rt = _rt(user, id)
+    c = rt.collector
+    rt.touch()  # quem pergunta pelos valores está olhando: leitura rápida
     wanted = [t for t in (s.strip() for s in tags.split(",")) if t][:300]
     c.watch(wanted)
     vals = c.current(wanted)
     return {
-        "status": c.status(),
+        "status": authz.collector_status(c.status(), _hide(user, as_)),
         "values": {t: (v if to_number(v) is not None or v is None else str(v)) for t, v in vals.items()},
     }
 
@@ -383,7 +403,7 @@ def _ws_runtime(user: User, id: int) -> MachineRuntime | None:
 
 
 @app.websocket("/ws/machines/{id}")
-async def ws_machine(socket: WebSocket, id: int):
+async def ws_machine(socket: WebSocket, id: int, as_: str = Query("", alias="as")):
     """Dados ao vivo de uma máquina. Enquanto aberto, a máquina lê no intervalo rápido."""
     user = await auth.ws_user(socket)
     if user is None:
@@ -391,36 +411,71 @@ async def ws_machine(socket: WebSocket, id: int):
     token = socket.state.session_token
     auth.track(app, token, socket)
     try:
-        await _ws_live(socket, user, id)
+        await _ws_live(socket, user, id, as_ == "cliente")
     finally:
         auth.untrack(app, token, socket)
 
 
-async def _ws_live(socket: WebSocket, user: User, id: int):
+def _still_sees(user: User, rt: MachineRuntime) -> bool:
+    """Confere com o cadastro atual do usuário (cliente pode ter mudado) e da máquina."""
+    fresh = _fleet().accounts.get_user(user.id)
+    return (fresh is not None and _fleet().runtime(rt.machine.id) is rt and not rt.closed
+            and rt.collector is not None and _visible(fresh, rt.machine))
+
+
+async def _ws_live(socket: WebSocket, user: User, id: int, as_client: bool = False):
     await socket.accept()
     rt = _ws_runtime(user, id)
     if rt is None:
         await socket.close(code=WS_NAO_ENCONTRADA, reason=NAO_ENCONTRADA)
         return
-    rt.enter()
-    try:
-        # cada volta assina o coletor atual; mudança de cadastro (version) confere tudo de novo
-        while _ws_runtime(user, id) is rt and rt.collector is not None:
+    hide = authz.hides_connection(user, as_client)
+
+    async def send_loop():
+        # cada volta assina o coletor atual; mudança de cadastro (version) confere tudo de novo,
+        # e a cada WS_RECHECK_SECONDS confere se o usuário ainda vê a máquina
+        while _still_sees(user, rt):
             c, seen = rt.collector, rt.version
             q = c.subscribe()
             try:
-                await socket.send_json(c.live())
+                await socket.send_json(authz.live_payload(c.live(), hide))
                 while rt.version == seen:
-                    payload = await q.get()
+                    try:
+                        payload = await asyncio.wait_for(q.get(), WS_RECHECK_SECONDS)
+                    except asyncio.TimeoutError:
+                        if not _still_sees(user, rt):
+                            break
+                        continue
                     if "_fleet" in payload:
                         continue
-                    await socket.send_json(payload)
+                    await socket.send_json(authz.live_payload(payload, hide))
             finally:
                 c.unsubscribe(q)
+            if rt.version == seen:  # saiu pelo tempo: perdeu a visão
+                break
         await socket.close(code=WS_NAO_ENCONTRADA, reason=NAO_ENCONTRADA)
-    except (WebSocketDisconnect, asyncio.CancelledError, RuntimeError):
-        pass
+
+    async def receive_loop():
+        # o navegador não manda nada; ler é o que percebe a aba fechada (sem esperar a próxima leitura)
+        while True:
+            msg = await socket.receive()
+            if msg["type"] == "websocket.disconnect":
+                return
+
+    rt.enter()
+    tasks = [asyncio.create_task(send_loop()), asyncio.create_task(receive_loop())]
+    try:
+        await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
     finally:
+        for t in tasks:
+            t.cancel()
+        for t in tasks:
+            try:
+                await t
+            except (WebSocketDisconnect, asyncio.CancelledError, RuntimeError):
+                pass
+            except Exception:
+                logging.getLogger(__name__).exception("falha no WebSocket de dados")
         rt.leave()
 
 
@@ -448,7 +503,8 @@ async def _ws_vnc(socket: WebSocket, user: User, machine_id: int, sid: str):
     hub, bridge, m = rt.hub, rt.bridge, rt.machine
     if hub is not None and bridge is not None and bridge.state == "missing":
         # Beckhoff sem as ferramentas no servidor: não adianta esperar, diz o que falta
-        await socket.close(code=1008, reason=_close_reason(bridge.error or "Tela da Beckhoff indisponível"))
+        text = authz.TELA_INDISPONIVEL if _hide(user) else (bridge.error or "Tela da Beckhoff indisponível")
+        await socket.close(code=1008, reason=_close_reason(text))
         return
     if hub is None:
         if not m.effective_vnc_enabled or m.kind == "demo":
@@ -485,12 +541,12 @@ def _hub_rt(user: User, machine_id: int) -> MachineRuntime:
 
 @app.get("/api/vnc/status")
 def vnc_status(machine: int = Query(...), sid: str = Query("", max_length=64),
-               user: User = Depends(auth.current_user)):
+               as_: str = Query("", alias="as"), user: User = Depends(auth.current_user)):
     rt = _hub_rt(user, machine)
     out = rt.hub.status(sid)
     if rt.bridge is not None:  # Beckhoff: estado da ponte CERHost (o que falta, se conectou)
         out["bridge"] = {"state": rt.bridge.state, "error": rt.bridge.error}
-    return out
+    return authz.vnc_status(out, _hide(user, as_))
 
 
 @app.post("/api/vnc/control")

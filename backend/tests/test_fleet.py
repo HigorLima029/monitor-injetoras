@@ -556,3 +556,73 @@ def test_hub_da_br_nao_mudou(tmp_path):
     assert fleet._new_hub(Machine(3, "D", "demo", "10.0.0.9", vnc_enabled=True, vnc_view_password="v"),
                           None) is None
     store.close()
+
+
+def test_touch_mantem_rapido_pelo_linger(tmp_path):
+    async def run():
+        now = [1000.0]
+        store, fleet, (a,) = _setup(tmp_path, [_demo("A")], clock=lambda: now[0])
+        try:
+            await fleet.start()
+            rt = fleet.runtime(a)
+            rt.touch()
+            assert rt.collector.poll_seconds == 2
+            now[0] += 59
+            rt.tick()
+            assert rt.collector.poll_seconds == 2
+            now[0] += 2
+            rt.tick()
+            assert rt.collector.poll_seconds == 10
+        finally:
+            await fleet.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_reload_abre_maquina_que_nao_abriu(tmp_path):
+    async def run():
+        store = MachineStore(str(tmp_path / "m.db"))
+        a = store.add(Machine(None, "A", "demo", "quebrado")).id
+
+        def factory(m):
+            if m.host == "quebrado":
+                raise RuntimeError("não abre")
+            return SimulatedSource()
+
+        fleet = Fleet(store, _settings(tmp_path), None, source_factory=factory)
+        try:
+            await fleet.start()
+            assert fleet.runtime(a) is None
+            store.update(a, {"host": "127.0.0.1"})
+            await fleet.reload(a, connection_changed=True)
+            assert fleet.runtime(a) is not None
+            # reload que falha tira o runtime; corrigir de novo reabre
+            store.update(a, {"host": "quebrado"})
+            await fleet.reload(a, connection_changed=True)
+            assert fleet.runtime(a) is None
+            store.update(a, {"host": "127.0.0.2"})
+            await fleet.reload(a, connection_changed=False)
+            assert fleet.runtime(a) is not None
+        finally:
+            await fleet.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_stop_fecha_maquinas_travadas_em_paralelo(tmp_path):
+    async def run():
+        store = MachineStore(str(tmp_path / "m.db"))
+        for n in "ABCD":
+            store.add(_demo(n))
+        fleet = Fleet(store, _settings(tmp_path), None, source_factory=lambda m: _SlowClose())
+        fleet.close_timeout = 0.3
+        await fleet.start()
+        t0 = asyncio.get_running_loop().time()
+        await fleet.stop()
+        assert asyncio.get_running_loop().time() - t0 < 0.9  # em série seriam 4 x 0,3 s
+        assert fleet.runtimes() == []
+        store.close()
+
+    asyncio.run(run())
