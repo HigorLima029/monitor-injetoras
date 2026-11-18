@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from .collector import Collector, to_number
 from .config import settings
+from .accounts import AccountStore, migrate_machine_clients
 from .machines import CONNECTION_FIELDS, Machine, MachineStore, seed_from_settings
 from .manager import MachineManager
 from .vnc_hub import VncHub, WebSocketTransport
@@ -28,7 +29,11 @@ SEM_MAQUINA = "Nenhuma máquina aberta. Cadastre uma em Máquinas."
 def build_manager() -> MachineManager:
     store = MachineStore(settings.config_db_path)
     seed_from_settings(store, settings, settings.machines_dir)
-    return MachineManager(store, settings)
+    accounts = AccountStore(settings.config_db_path)
+    migrate_machine_clients(store, accounts)
+    manager = MachineManager(store, settings)
+    manager.accounts = accounts
+    return manager
 
 
 @asynccontextmanager
@@ -39,6 +44,9 @@ async def lifespan(app: FastAPI):
     yield
     await manager.stop()
     manager.store.close()
+    accounts = getattr(manager, "accounts", None)
+    if accounts is not None:
+        accounts.close()
 
 
 app = FastAPI(title="Monitor de Injetoras", lifespan=lifespan)
@@ -76,7 +84,7 @@ class MachineIn(BaseModel):
     name: str
     kind: str
     host: str
-    client: str = "Chen Hsong"
+    client_id: int | None = None
     opcua_port: int = 4840
     namespace: int | None = None
     ams_net_id: str = ""
@@ -93,7 +101,7 @@ class MachineUpdate(BaseModel):
     name: str | None = None
     kind: str | None = None
     host: str | None = None
-    client: str | None = None
+    client_id: int | None = None
     opcua_port: int | None = None
     namespace: int | None = None
     ams_net_id: str | None = None
@@ -186,7 +194,9 @@ def info():
     return {
         "machine_id": m.id,
         "kind": m.kind,
-        "client": m.client,
+        "client_id": m.client_id,
+        "client": (lambda a, c: a.get_client(c).name if a and c and a.get_client(c) else "")(
+            getattr(mgr, "accounts", None), m.client_id),
         "machine_name": m.name,
         "opcua_url": f"ads://{m.host}" if m.kind == "ads" else m.opcua_url,
         "simulate": demo,

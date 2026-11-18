@@ -178,7 +178,7 @@ def test_remover_senha_explicito(store):
 
 def test_update_none_em_campo_obrigatorio_e_valueerror(store):
     m = store.add(Machine(None, "A", "chy", "1.1.1.1", notes="n"))
-    for campo in ("name", "client", "notes", "ams_net_id", "host", "kind", "opcua_port"):
+    for campo in ("name", "notes", "ams_net_id", "host", "kind", "opcua_port"):
         with pytest.raises(ValueError):
             store.update(m.id, {campo: None})
     assert store.update(m.id, {"namespace": None, "vnc_enabled": None}).notes == "n"
@@ -188,3 +188,14 @@ def test_update_none_em_campo_obrigatorio_e_valueerror(store):
 def test_seed_url_invalida_comeca_vazio(tmp_path, store, url):
     seed_from_settings(store, _settings(tmp_path, opcua_url=url), str(tmp_path / "m"))
     assert store.list() == [] and store.active_id() is None
+
+
+def test_client_id_e_vnc_sem_senha(store):
+    m = store.add(Machine(None, "A", "em63", "1.1.1.1", client_id=3))
+    assert store.get(m.id).client_id == 3
+    assert "client" not in m.public() and m.public()["client_id"] == 3
+    assert m.public()["vnc_sem_senha"] is True
+    assert Machine(None, "A", "em63", "1.1.1.1", vnc_view_password="v").public()["vnc_sem_senha"] is False
+    assert Machine(None, "A", "chy", "1.1.1.1").public()["vnc_sem_senha"] is False
+    assert Machine(None, "A", "em63", "1.1.1.1", vnc_enabled=False).public()["vnc_sem_senha"] is False
+    assert store.update(m.id, {"client_id": None}).client_id is None

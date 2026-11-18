@@ -15,7 +15,7 @@ KINDS = ("chy", "em63", "ads", "demo")
 _PROFILE = {"chy": "chy", "em63": "em63", "ads": "ads", "demo": "chy"}
 _NAMESPACE = {"chy": 1, "em63": 6, "ads": 1, "demo": 1}
 _SECRETS = ("vnc_view_password", "vnc_control_password")
-_NULLABLE = ("namespace", "vnc_enabled")  # None = padrão do tipo
+_NULLABLE = ("namespace", "vnc_enabled", "client_id")  # None = padrão do tipo
 # Campos que mudam a conexão com a máquina: só eles exigem reabrir a máquina aberta.
 CONNECTION_FIELDS = ("kind", "host", "opcua_port", "namespace", "ams_net_id", "ads_port",
                      "vnc_enabled", "vnc_port", *_SECRETS)
@@ -26,7 +26,8 @@ CREATE TABLE IF NOT EXISTS machines (
     name TEXT NOT NULL,
     kind TEXT NOT NULL,
     host TEXT NOT NULL,
-    client TEXT NOT NULL DEFAULT 'Chen Hsong',
+    client TEXT NOT NULL DEFAULT 'Chen Hsong',  -- legado: só lido pela migração para client_id
+    client_id INTEGER,
     opcua_port INTEGER NOT NULL DEFAULT 4840,
     namespace INTEGER,
     ams_net_id TEXT NOT NULL DEFAULT '',
@@ -47,7 +48,7 @@ class Machine:
     name: str
     kind: str
     host: str
-    client: str = "Chen Hsong"
+    client_id: int | None = None
     opcua_port: int = 4840
     namespace: int | None = None  # None = padrão do tipo
     ams_net_id: str = ""
@@ -87,6 +88,8 @@ class Machine:
         d["has_control_password"] = bool(self.vnc_control_password)
         d["profile"] = self.profile
         d["opcua_url"] = self.opcua_url
+        d["vnc_sem_senha"] = (self.kind == "em63" and self.effective_vnc_enabled
+                              and not self.vnc_view_password and not self.vnc_control_password)
         return d
 
 
@@ -117,6 +120,10 @@ class MachineStore:
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
         self._conn.executescript(SCHEMA)
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(machines)")}
+        if "client_id" not in cols:  # banco criado antes das contas
+            self._conn.execute("ALTER TABLE machines ADD COLUMN client_id INTEGER")
+            self._conn.commit()
         self._lock = threading.Lock()
 
     def close(self) -> None:
@@ -185,6 +192,29 @@ class MachineStore:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM machines WHERE id=?", (id,))
             self._conn.execute("DELETE FROM kv WHERE key='active_id' AND value=?", (str(id),))
+
+    def legacy_client_names(self) -> list[tuple[int, str]]:
+        """(id, texto antigo do cliente) das máquinas ainda sem client_id; só para a migração."""
+        with self._lock:
+            return [(r[0], r[1]) for r in self._conn.execute(
+                "SELECT id, client FROM machines WHERE client_id IS NULL ORDER BY id")]
+
+    def get_flag(self, key: str) -> str | None:
+        with self._lock:
+            row = self._conn.execute("SELECT value FROM kv WHERE key=?", (key,)).fetchone()
+        return row[0] if row else None
+
+    def set_flag(self, key: str, value: str) -> None:
+        with self._lock, self._conn:
+            self._conn.execute(
+                "INSERT INTO kv(key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+
+    def assign_clients(self, mapping: dict[int, int]) -> None:
+        """Define client_id de várias máquinas de uma vez (machine_id -> client_id)."""
+        with self._lock, self._conn:
+            self._conn.executemany("UPDATE machines SET client_id=? WHERE id=?",
+                                   [(c, m) for m, c in mapping.items()])
 
     def active_id(self) -> int | None:
         with self._lock:

@@ -80,7 +80,7 @@ def test_trocar_pela_api(api):
     r = client.post(f"/api/machines/{b}/activate")
     assert r.status_code == 200 and r.json()["id"] == b
     info = client.get("/api/info").json()
-    assert info["machine_id"] == b and info["kind"] == "demo" and info["client"] == "Chen Hsong"
+    assert info["machine_id"] == b and info["kind"] == "demo" and "client_id" in info
     assert client.get("/api/machines").json()["active_id"] == b
     assert client.post("/api/machines/999/activate").status_code == 404
 
@@ -170,7 +170,7 @@ def test_put_troca_ip_apaga_senhas_e_remove_explicito(api):
 
 def test_put_none_em_obrigatorio_e_422(api):
     client, store, a, b = api
-    for campo in ("name", "client", "notes", "ams_net_id"):
+    for campo in ("name", "notes", "ams_net_id"):
         assert client.put(f"/api/machines/{b}", json={campo: None}).status_code == 422
 
 
@@ -180,11 +180,11 @@ def test_put_na_ativa_sem_mudar_conexao_nao_reativa(api):
     antes = mgr.collector
     with client.websocket_connect("/ws") as ws:
         ws.receive_json()
-        r = client.put(f"/api/machines/{a}", json={"name": "A renomeada", "notes": "x", "client": "Outro"})
+        r = client.put(f"/api/machines/{a}", json={"name": "A renomeada", "notes": "x", "client_id": 5})
         assert r.status_code == 200
         assert mgr.collector is antes
         info = client.get("/api/info").json()
-        assert info["machine_name"] == "A renomeada" and info["client"] == "Outro"
+        assert info["machine_name"] == "A renomeada" and info["client_id"] == 5
         r = client.put(f"/api/machines/{a}", json={"host": "127.0.0.9"})
         assert mgr.collector is not antes
         for _ in range(50):
