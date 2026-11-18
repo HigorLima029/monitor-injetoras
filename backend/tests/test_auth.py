@@ -106,10 +106,89 @@ def test_bloqueio_progressivo(client):
 
 def test_bloqueio_por_ip():
     lim = LoginLimiter(max_failures=5, base_wait=30, max_wait=900)
-    for i in range(30):  # um login diferente por tentativa, do mesmo IP
+    for i in range(5):  # um login diferente por tentativa, do mesmo IP
         lim.failure(f"u{i}", "6.6.6.6", now=1000)
-    assert lim.wait_for("outro", "6.6.6.6", now=1000) > 0
+    assert lim.wait_for("outro", "6.6.6.6", now=1000) == 30
     assert lim.wait_for("outro", "7.7.7.7", now=1000) == 0
+    lim.success("u0", "6.6.6.6")  # um acerto não limpa o IP
+    assert lim.wait_for("outro", "6.6.6.6", now=1000) == 30
+
+
+def test_reserva_atomica():
+    lim = LoginLimiter(max_failures=5, base_wait=30, max_wait=900)
+    for _ in range(5):
+        assert lim.reserve("ana", "1.1.1.1", now=1000) == 0
+    assert lim.reserve("ana", "1.1.1.1", now=1000) == 30
+    lim.release("ana", "1.1.1.1")  # a última estava certa: desfaz
+    assert lim.reserve("ana", "1.1.1.1", now=1000) == 0
+    lim2 = LoginLimiter()
+    assert lim2.reserve("bia", "2.2.2.2", now=1000) == 0
+    lim2.release("bia", "2.2.2.2")
+    for _ in range(4):
+        lim2.failure("bia", "2.2.2.2", now=1000)
+    assert lim2.wait_for("bia", "2.2.2.2", now=1000) == 0  # a reserva desfeita não contou
+
+
+def test_limiter_poda_e_limita_memoria(monkeypatch):
+    lim = LoginLimiter(max_failures=5, base_wait=30, max_wait=900)
+    for i in range(50):
+        lim.failure(f"u{i}", f"ip{i}", now=1000)
+    lim.wait_for("x", "y", now=1000 + 1801)  # passou de 2 x max_wait: tudo caduca
+    assert len(lim._users) == 0 and len(lim._ips) == 0
+    monkeypatch.setattr(LoginLimiter, "MAX_KEYS", 10)
+    for i in range(30):
+        lim.failure(f"v{i}", f"ip{i}", now=5000 + i)
+    assert len(lim._users) == 10 and len(lim._ips) == 10
+    assert "v29" in lim._users and "v0" not in lim._users  # sai a mais antiga
+
+
+def test_logins_em_paralelo_nao_furam_o_limite(client, accounts, monkeypatch):
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    calls = []
+    lock = threading.Lock()
+    real = accounts.check_password
+
+    def slow(username, pw):
+        with lock:
+            calls.append(username)
+        time.sleep(0.3)  # o scrypt demora: os pedidos se sobrepõem
+        return real(username, pw)
+
+    monkeypatch.setattr(accounts, "check_password", slow)
+    clients = []
+    for _ in range(12):
+        c = HttpsClient(main.app)
+        c.portal = client.portal
+        clients.append(c)
+    with ThreadPoolExecutor(max_workers=12) as ex:
+        codes = list(ex.map(lambda c: login(c, "ana", "errada-errada").status_code, clients))
+    assert len(calls) <= 5
+    assert codes.count(401) == len(calls) and codes.count(429) == 12 - len(calls)
+
+
+def test_sem_docs_publicas(client):
+    for path in ("/docs", "/redoc", "/openapi.json"):
+        r = client.get(path)
+        assert "swagger" not in r.text.lower() and "redoc" not in r.text.lower(), path
+        assert '"openapi"' not in r.text and '"paths"' not in r.text, path
+    assert main.app.openapi_url is None and main.app.docs_url is None and main.app.redoc_url is None
+
+
+def test_websockets_registrados_por_app(client):
+    login(client, "ana", "senha12345")
+    reg = auth.state(main.app).sockets
+    with client.websocket_connect("/ws") as ws:
+        ws.receive_json()
+        token = client.cookies.get("monitor_sessao")
+        assert reg.tokens() == [token] and len(reg.sockets(token)) == 1
+    for _ in range(100):
+        if not reg.tokens():
+            break
+        time.sleep(0.01)
+    assert reg.tokens() == []
+    assert auth.AuthState().sockets.tokens() == []  # nada global
 
 
 def test_mae_precisa_do_codigo(client, accounts):

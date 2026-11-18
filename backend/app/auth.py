@@ -11,6 +11,7 @@ import math
 import secrets
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
@@ -47,53 +48,85 @@ class _Failures:
 
 
 class LoginLimiter:
-    """Espera crescente por login tentado e por IP: depois de `max_failures` falhas,
-    `base_wait` s, dobrando a cada nova falha, até `max_wait`. O IP tolera mais falhas
-    (várias pessoas atrás do mesmo NAT) antes de começar a esperar."""
+    """Espera crescente por login tentado e por IP: depois de `max_failures` falhas (de um login
+    OU de um IP), `base_wait` s, dobrando a cada nova falha, até `max_wait`.
 
-    IP_FACTOR = 4
+    `reserve` conta a tentativa como falha ANTES de conferir a senha (checagem e reserva sob o
+    mesmo lock); `release` desfaz a reserva quando a senha/código estava certo. Assim pedidos em
+    paralelo não passam do limite enquanto o scrypt roda."""
+
     MAX_KEYS = 10000
 
     def __init__(self, max_failures: int = 5, base_wait: float = 30, max_wait: float = 900):
         self.max_failures = max_failures
         self.base_wait = base_wait
         self.max_wait = max_wait
-        self._users: dict[str, _Failures] = {}
-        self._ips: dict[str, _Failures] = {}
+        self._forget = max_wait * 2  # sem falhas novas nesse tempo, o contador caduca
+        # ordenadas pela última falha (a mais antiga na frente): podar é barato
+        self._users: OrderedDict[str, _Failures] = OrderedDict()
+        self._ips: OrderedDict[str, _Failures] = OrderedDict()
         self._lock = threading.Lock()
 
     @staticmethod
     def _norm(username: str) -> str:
         return (username or "").strip().lower()
 
-    def _wait(self, f: _Failures | None, threshold: int, now: float) -> float:
-        if f is None or f.count < threshold:
-            return 0.0
-        wait = min(self.base_wait * 2 ** (f.count - threshold), self.max_wait)
-        return max(0.0, f.last + wait - now)
+    def _prune(self, now: float) -> None:
+        for table in (self._users, self._ips):
+            while table:
+                key, f = next(iter(table.items()))
+                if now - f.last <= self._forget and len(table) <= self.MAX_KEYS:
+                    break
+                table.popitem(last=False)
 
-    def _forget_old(self, table: dict[str, _Failures], now: float) -> None:
-        if len(table) <= self.MAX_KEYS:
-            return
-        for k in [k for k, f in table.items() if now - f.last > self.max_wait]:
-            del table[k]
+    def _wait_locked(self, username: str, ip: str, now: float) -> float:
+        waits = [0.0]
+        for f in (self._users.get(self._norm(username)), self._ips.get(ip)):
+            if f is not None and f.count >= self.max_failures:
+                wait = min(self.base_wait * 2 ** (f.count - self.max_failures), self.max_wait)
+                waits.append(f.last + wait - now)
+        return max(waits)
+
+    def _bump_locked(self, username: str, ip: str, now: float) -> None:
+        for table, key in ((self._users, self._norm(username)), (self._ips, ip)):
+            f = table.get(key)
+            if f is None:
+                f = table[key] = _Failures()
+            f.count += 1
+            f.last = now
+            table.move_to_end(key)
+        self._prune(now)
 
     def wait_for(self, username: str, ip: str, now: float | None = None) -> float:
         now = time.time() if now is None else now
         with self._lock:
-            return max(self._wait(self._users.get(self._norm(username)), self.max_failures, now),
-                       self._wait(self._ips.get(ip), self.max_failures * self.IP_FACTOR, now))
+            self._prune(now)
+            return self._wait_locked(username, ip, now)
 
     def failure(self, username: str, ip: str, now: float | None = None) -> None:
         now = time.time() if now is None else now
         with self._lock:
+            self._prune(now)
+            self._bump_locked(username, ip, now)
+
+    def reserve(self, username: str, ip: str, now: float | None = None) -> float:
+        """0 = pode tentar (e a tentativa já conta como falha); > 0 = segundos de espera."""
+        now = time.time() if now is None else now
+        with self._lock:
+            self._prune(now)
+            wait = self._wait_locked(username, ip, now)
+            if wait > 0:
+                return wait
+            self._bump_locked(username, ip, now)
+            return 0.0
+
+    def release(self, username: str, ip: str) -> None:
+        """Desfaz uma `reserve` cuja senha/código estava certo."""
+        with self._lock:
             for table, key in ((self._users, self._norm(username)), (self._ips, ip)):
                 f = table.get(key)
-                if f is None or now - f.last > self.max_wait * 2:  # falhas antigas caducam
-                    f = table[key] = _Failures()
-                f.count += 1
-                f.last = now
-                self._forget_old(table, now)
+                if f is not None and f.count > 0:
+                    f.count -= 1
 
     def success(self, username: str, ip: str) -> None:
         """Zera só o login: um acerto não limpa as falhas acumuladas pelo IP."""
@@ -162,6 +195,42 @@ class TotpGuard:
         return True
 
 
+class SocketRegistry:
+    """WebSockets abertos por token de sessão (um registro por app)."""
+
+    def __init__(self):
+        self._open: dict[str, set[WebSocket]] = {}
+
+    def track(self, token: str, socket: WebSocket) -> None:
+        self._open.setdefault(token, set()).add(socket)
+
+    def untrack(self, token: str, socket: WebSocket) -> None:
+        socks = self._open.get(token)
+        if socks is None:
+            return
+        socks.discard(socket)
+        if not socks:
+            self._open.pop(token, None)
+
+    def tokens(self) -> list[str]:
+        return list(self._open)
+
+    def sockets(self, token: str) -> set[WebSocket]:
+        return set(self._open.get(token, ()))
+
+    async def close_token(self, token: str) -> None:
+        for s in list(self._open.pop(token, ())):
+            try:
+                await s.close(code=WS_SEM_LOGIN, reason="Sessão encerrada")
+            except Exception:  # já fechado
+                pass
+
+    async def sweep_once(self, accounts: AccountStore) -> None:
+        for token in self.tokens():
+            if accounts.session_user(token) is None:
+                await self.close_token(token)
+
+
 class AuthState:
     """Estado em memória do login, um por app (criado no lifespan)."""
 
@@ -169,51 +238,32 @@ class AuthState:
         self.limiter = LoginLimiter()
         self.tickets = TicketStore()
         self.totp = TotpGuard()
+        self.sockets = SocketRegistry()
 
 
-def _state(app) -> AuthState:
+def state(app) -> AuthState:
     st = getattr(app.state, "auth", None)
     if st is None:
         st = app.state.auth = AuthState()
     return st
 
 
-# ---- WebSockets abertos por sessão -------------------------------------------
-_open: dict[str, set[WebSocket]] = {}
+_state = state
 
 
-def track(token: str, socket: WebSocket) -> None:
-    _open.setdefault(token, set()).add(socket)
+def track(app, token: str, socket: WebSocket) -> None:
+    state(app).sockets.track(token, socket)
 
 
-def untrack(token: str, socket: WebSocket) -> None:
-    socks = _open.get(token)
-    if socks is None:
-        return
-    socks.discard(socket)
-    if not socks:
-        _open.pop(token, None)
+def untrack(app, token: str, socket: WebSocket) -> None:
+    state(app).sockets.untrack(token, socket)
 
 
-async def close_token(token: str) -> None:
-    for s in list(_open.pop(token, ())):
-        try:
-            await s.close(code=WS_SEM_LOGIN, reason="Sessão encerrada")
-        except Exception:  # já fechado
-            pass
-
-
-async def sweep_once(accounts: AccountStore) -> None:
-    for token in list(_open):
-        if accounts.session_user(token) is None:
-            await close_token(token)
-
-
-async def sweeper(accounts: AccountStore) -> None:
+async def sweeper(accounts: AccountStore, sockets: SocketRegistry) -> None:
     while True:
         await asyncio.sleep(SWEEP_SECONDS)
         try:
-            await sweep_once(accounts)
+            await sockets.sweep_once(accounts)
         except Exception as exc:
             log.warning("falha na varredura de sessões: %s", type(exc).__name__)
 
@@ -353,14 +403,14 @@ def login(body: LoginIn, request: Request):
     accounts = _accounts(request.app)
     limiter = _state(request.app).limiter
     ip = _ip(request)
-    wait = limiter.wait_for(body.username, ip)
+    wait = limiter.reserve(body.username, ip)  # já conta como falha até a senha conferir
     if wait > 0:
         raise _muitas(wait)
     u = accounts.check_password(body.username, body.password)
     if u is None:
-        limiter.failure(body.username, ip)
         accounts.log("login_falhou", None, ip=ip, detail=(body.username or "").strip()[:100])
         raise HTTPException(401, LOGIN_ERRADO)
+    limiter.release(body.username, ip)  # senha certa: desfaz a reserva
     if u.has_totp:
         return {"need_code": True, "ticket": _state(request.app).tickets.issue(u.id)}
     if u.role == "mae":
@@ -378,14 +428,14 @@ def login_code(body: CodeIn, request: Request):
     u = accounts.get_user(uid) if uid is not None else None
     if u is None or not u.active:
         raise HTTPException(401, "Entre de novo com usuário e senha.")
-    wait = limiter.wait_for(u.username, ip)
+    wait = limiter.reserve(u.username, ip)
     if wait > 0:
         raise _muitas(wait)
     secret = accounts.totp_secret(u.id)
     if not secret or not st.totp.check(u.id, secret, body.code):
-        limiter.failure(u.username, ip)
         accounts.log("login_falhou", u, ip=ip, detail=f"{u.username} (código)")
         raise HTTPException(401, CODIGO_ERRADO)
+    limiter.release(u.username, ip)
     tickets.consume(body.ticket)
     return _start_session(request, accounts, u)
 
@@ -397,7 +447,7 @@ async def logout(request: Request):
     token = request.cookies.get(COOKIE, "")
     accounts.delete_session(token)
     accounts.log("logout", u, ip=_ip(request))
-    await close_token(token)
+    await _state(request.app).sockets.close_token(token)
     resp = Response(status_code=204)
     resp.delete_cookie(COOKIE, path="/", secure=settings.cookie_secure, httponly=True, samesite="strict")
     return resp

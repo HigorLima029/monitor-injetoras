@@ -386,3 +386,41 @@ def test_registro_com_rotulo_da_maquina(tmp_path):
     hub.audit("alguem entrou")
     linha = log_path.read_text(encoding="utf-8")
     assert "[Bk 10.0.0.7] alguem entrou" in linha and "127.0.0.1" not in linha
+
+
+def test_usuario_desativado_perde_a_tela_ao_vivo(tmp_path, monkeypatch, panel, client_as, accounts):
+    from types import SimpleNamespace
+
+    from starlette.websockets import WebSocketDisconnect
+
+    from app import auth, main
+    from app.machines import Machine, MachineStore
+    from app.manager import MachineManager
+    from app.sources import SimulatedSource
+
+    monkeypatch.setattr(auth, "SWEEP_SECONDS", 0.1)
+    cfg = SimpleNamespace(
+        machines_dir=str(tmp_path / "machines"), poll_seconds=1, full_poll_seconds=60,
+        retention_days=7, vnc_tcp_port=0, vnc_tcp_bind="127.0.0.1", vnc_control_timeout=300,
+        vnc_audit_path=None, ads_local_net_id="")
+    store = MachineStore(str(tmp_path / "m.db"))
+    store.set_active(store.add(Machine(None, "Painel", "em63", "127.0.0.1", vnc_enabled=True,
+                                       vnc_port=panel.port, vnc_view_password=VIEW)).id)
+    monkeypatch.setattr(main.app.state, "manager", MachineManager(
+        store, cfg, source_factory=lambda m: SimulatedSource(seed=2)), raising=False)
+    client = client_as("tecnico")
+    uid = client.get("/api/me").json()["id"]
+    with client.websocket_connect("/ws/vnc?sid=olho", subprotocols=["binary"]) as ws:
+        assert ws.receive_bytes() == b"RFB 003.008\n"
+        ws.send_bytes(b"RFB 003.008\n")
+        assert ws.receive_bytes() == b"\x01\x02"
+        ws.send_bytes(b"\x02")
+        ws.send_bytes(vnc_response(VIEW, ws.receive_bytes()))
+        assert ws.receive_bytes() == b"\x00\x00\x00\x00"
+        accounts.update_user(uid, active=False)
+        start = time.monotonic()
+        with pytest.raises(WebSocketDisconnect) as exc:
+            for _ in range(10000):
+                ws.receive_bytes()
+        assert exc.value.code == 4401
+        assert time.monotonic() - start < 5

@@ -58,7 +58,7 @@ async def lifespan(app: FastAPI):
     app.state.accounts = accounts
     app.state.auth = auth.AuthState()
     await manager.start()
-    sweeper = asyncio.create_task(auth.sweeper(accounts))
+    sweeper = asyncio.create_task(auth.sweeper(accounts, app.state.auth.sockets))
     try:
         yield
     finally:
@@ -70,7 +70,8 @@ async def lifespan(app: FastAPI):
             accounts.close()
 
 
-app = FastAPI(title="Monitor de Injetoras", lifespan=lifespan)
+app = FastAPI(title="Monitor de Injetoras", lifespan=lifespan,
+              docs_url=None, redoc_url=None, openapi_url=None)  # sem docs públicas
 app.add_middleware(auth.AuthMiddleware)
 app.include_router(auth.router)
 
@@ -333,11 +334,11 @@ async def ws(socket: WebSocket):
     if await auth.ws_user(socket) is None:
         return
     token = socket.state.session_token
-    auth.track(token, socket)
+    auth.track(app, token, socket)
     try:
         await _ws_live(socket)
     finally:
-        auth.untrack(token, socket)
+        auth.untrack(app, token, socket)
 
 
 async def _ws_live(socket: WebSocket):
@@ -367,11 +368,11 @@ async def ws_vnc(socket: WebSocket, sid: str = Query("", max_length=64)):
     if await auth.ws_user(socket) is None:
         return
     token = socket.state.session_token
-    auth.track(token, socket)
+    auth.track(app, token, socket)
     try:
         await _ws_vnc(socket, sid)
     finally:
-        auth.untrack(token, socket)
+        auth.untrack(app, token, socket)
 
 
 async def _ws_vnc(socket: WebSocket, sid: str):
