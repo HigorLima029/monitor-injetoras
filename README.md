@@ -32,7 +32,7 @@ Períodos: 1 h, 8 h, 24 h e 7 dias. Tema claro/escuro. Funciona no celular.
 Recria as principais telas do painel CHY (layout baseado nas fotos do painel e no
 manual *Multifunctional Injection Molding Computer Operating Instructions*). Os
 valores vêm do OPC-UA e atualizam a cada poucos segundos: a tela aberta pede as
-suas variáveis em `GET /api/values`, que as inclui na leitura rápida.
+suas variáveis em `GET /api/machines/{id}/values`, que as inclui na leitura rápida.
 
 - Trocar de tela aqui **não** muda a tela do painel físico; nenhum valor é editável.
 - Campos com **—** existem no painel, mas o gateway não publica o dado (posições
@@ -69,8 +69,8 @@ No lugar dela aparece a **Tela ao vivo**: a IHM real, pelo VNC do painel (porta
 
 O painel B&R aceita **um cliente VNC só**. Por isso o Monitor é esse cliente (o
 *hub*, `backend/app/vnc_hub.py`): ele mantém uma conexão com o painel, guarda a
-imagem e a repassa para quantas pessoas quiserem assistir, pelo navegador ou por um
-cliente VNC comum, como o Espelho IHM, na porta `VNC_TCP_PORT` (5901).
+imagem e a repassa para quantas pessoas quiserem assistir, pelo navegador (só com
+login; a antiga porta VNC comum 5901, usada pelo Espelho IHM, não existe mais).
 
 A senha digitada define o papel, como no Espelho:
 
@@ -97,8 +97,8 @@ Regras de segurança:
   o navegador nunca as recebe. Sem a senha de visualização, a Tela ao vivo fica desligada.
 - Quando ninguém está assistindo, o hub solta o painel depois de alguns segundos.
 
-Com o Monitor ligado, **aponte o Espelho IHM para o Monitor** (`<IP do Monitor>:5901`),
-não direto no painel: se outro cliente se conectar direto, o painel derruba um dos dois.
+Com o Monitor ligado, não conecte o Espelho IHM (nem outro cliente VNC) direto no painel: o
+painel aceita um cliente só e derrubaria um dos dois. Use a Tela ao vivo do Monitor.
 
 Os dados de produção (OPC-UA) continuam **só leitura**: o controle remoto vale só
 para a tela, e só com a senha de operação.
@@ -108,8 +108,7 @@ para a tela, e só com a senha de operação.
 O painel Windows CE da Beckhoff só fala o protocolo fechado do CERHost (porta 987). O próprio
 servidor do Monitor roda o `CERHOST.exe` no Wine, numa tela virtual, e a serve por VNC só em
 `127.0.0.1`; o hub VNC consome essa tela como a de um painel B&R, com as mesmas regras (senha de
-visualização, senha de operação, um operador por vez, registro, e a porta 5901 só visualização
-depois de uma troca de máquina):
+visualização, senha de operação, um operador por vez, registro):
 
 ```
 Beckhoff :987 ── CERHOST.exe (Wine 32) em Xvfb + Openbox ── x11vnc (127.0.0.1) ── hub VNC ── navegador
@@ -256,7 +255,9 @@ Esqueceu a senha ou perdeu o celular? Use `resetar-senha --usuario LOGIN` ou
 |---|---|---|
 | `OPCUA_URL` | `opc.tcp://10.202.148.102:4840` | Endereço do OPC-UA do gateway |
 | `MACHINE_NAME` | `Injetora Chen Hsong (bancada)` | Nome no topo do painel |
-| `POLL_SECONDS` | `5` | Intervalo de leitura de KPIs e alarmes |
+| `POLL_SECONDS` | `2` | Intervalo de leitura enquanto alguém olha a máquina |
+| `IDLE_POLL_SECONDS` | `10` | Intervalo de leitura sem ninguém olhando (economiza o 4G) |
+| `VIEWER_LINGER_SECONDS` | `60` | Depois que o último sai, segundos até voltar ao intervalo ocioso |
 | `FULL_POLL_SECONDS` | `60` | Intervalo de leitura completa |
 | `SIMULATE` | `0` | `1` usa o simulador no lugar do gateway |
 | `DB_PATH` | `data/monitor.db` | Arquivo do histórico |
@@ -267,7 +268,6 @@ Esqueceu a senha ou perdeu o celular? Use `resetar-senha --usuario LOGIN` ou
 | `VNC_VIEW_PASSWORD` | vazio | Só na importação inicial; depois a senha fica no cadastro da máquina |
 | `VNC_CONTROL_PASSWORD` | vazio | Senha VNC de operação (vazia = ninguém opera) |
 | `VNC_CONTROL_TIMEOUT` | `300` | Segundos sem uso até o controle voltar a só visualização |
-| `VNC_TCP_PORT` | `5901` | Porta VNC comum do Monitor para o Espelho IHM (`0` desliga) |
 | `CONFIG_DB_PATH` | `data/monitor_config.db` | Cadastro de máquinas (SQLite) |
 | `MACHINES_DIR` | `data/machines` | Histórico e cache de tags de cada máquina |
 | `ADS_LOCAL_NET_ID` | vazio | AMS Net ID deste servidor (máquinas `ads`) |
@@ -281,19 +281,22 @@ Esqueceu a senha ou perdeu o celular? Use `resetar-senha --usuario LOGIN` ou
 
 | Rota | Retorno |
 |---|---|
-| `GET/POST /api/machines`, `PUT/DELETE /api/machines/{id}` | Cadastro de máquinas (sem as senhas VNC) e status de cada uma |
-| `POST /api/machines/{id}/activate` · `/test` | Abre a máquina (troca a ativa) · testa se responde na rede |
-| `GET /api/info` | Máquina aberta: nome, endereço, tipo, zonas do canhão, rótulos |
-| `GET /api/live` | Estado + valores atuais dos KPIs |
-| `GET /api/history?tags=A,B&minutes=60` | Séries no tempo (reduzidas para ~300 pontos) |
-| `GET /api/production?hours=8` | Peças e refugo por intervalo, ciclo médio |
-| `GET /api/alarms?hours=24` | Alarmes ativos e eventos |
-| `GET /api/values?tags=A,B` | Valores atuais de tags específicas (usado pelo Painel da máquina) |
-| `GET /api/vnc/status?sid=…` | Papel da sessão, quem está operando, tempo restante; na Beckhoff, `bridge: {state, error}` |
-| `POST /api/vnc/control` | `{"sid", "action": "take" \| "release"}`: assumir ou liberar o controle |
-| `GET /api/tags?q=temp` | Todas as variáveis com valor atual |
-| `WS /ws` | Valores ao vivo a cada leitura |
-| `WS /ws/vnc` | Tela do painel (VNC), só visualização |
+| `GET /api/machines?client_id=` | Máquinas que o usuário pode ver, com status (`client_id=0` = em preparação) |
+| `POST /api/machines`, `PUT/DELETE /api/machines/{id}` | Cadastro (só conta mãe; sem as senhas VNC) |
+| `POST /api/machines/{id}/test` | Testa se a máquina responde na rede (conta mãe e técnico) |
+| `GET /api/machines/{id}/info?as=cliente` | Nome, tipo, zonas do canhão, rótulos (`as=cliente`: como o cliente vê) |
+| `GET /api/machines/{id}/live` | Estado + valores atuais dos KPIs |
+| `GET /api/machines/{id}/history?tags=A,B&minutes=60` | Séries no tempo (reduzidas para ~300 pontos) |
+| `GET /api/machines/{id}/production?hours=8` | Peças e refugo por intervalo, ciclo médio |
+| `GET /api/machines/{id}/alarms?hours=24` | Alarmes ativos e eventos |
+| `GET /api/machines/{id}/values?tags=A,B` | Valores atuais de tags específicas (usado pelo Painel da máquina) |
+| `GET /api/machines/{id}/tags?q=temp` | Todas as variáveis com valor atual |
+| `GET /api/vnc/status?machine=…&sid=…` | Papel da sessão, quem está operando, tempo restante; na Beckhoff, `bridge: {state, error}` |
+| `POST /api/vnc/control?machine=…` | `{"sid", "action": "take" \| "release"}`: assumir ou liberar o controle |
+| `WS /ws/machines/{id}` | Valores ao vivo a cada leitura (enquanto aberto, a máquina lê no intervalo rápido) |
+| `WS /ws/vnc?machine=…` | Tela do painel (VNC) |
+
+Máquina inexistente ou de outro cliente responde 404 em todas as rotas.
 
 ## Observações sobre os dados
 

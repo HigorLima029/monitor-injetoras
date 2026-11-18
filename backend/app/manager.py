@@ -1,5 +1,9 @@
-"""Dono da máquina ativa: troca coletor, hub VNC e ponte CERHost em tempo de execução e sonda o
-status de todas."""
+"""Frota: todas as máquinas cadastradas conectadas ao mesmo tempo, cada uma com o seu coletor.
+
+Sem ninguém olhando, cada coletor lê a cada `idle_poll_seconds` (10 s, economiza o 4G); com alguém
+com a máquina aberta (dados ou tela), lê a cada `poll_seconds`, e volta ao intervalo ocioso
+`viewer_linger_seconds` depois que o último sai.
+"""
 from __future__ import annotations
 
 import asyncio
@@ -8,7 +12,6 @@ import logging
 import time
 from pathlib import Path
 
-from .accounts import AccountStore
 from .cerhost import CerhostBridge
 from .collector import Collector
 from .em63 import Em63Source
@@ -19,50 +22,186 @@ from .vnc_hub import VncHub
 
 log = logging.getLogger(__name__)
 
-PROBE_INTERVAL = 30.0
 PROBE_TIMEOUT = 3.0
 CLOSE_TIMEOUT = 5.0  # maior que o limite do disconnect() das fontes OPC-UA (4 s)
-SWITCH_REASON = "máquina trocada"
+TICK_INTERVAL = 1.0  # o laço da frota confere o intervalo de leitura de cada máquina
+REOPEN_REASON = "máquina reconfigurada"
+REMOVE_REASON = "máquina removida"
 BRIDGE_HOST = "127.0.0.1"  # o x11vnc da ponte só escuta aqui
 
 
-class MachineManager:
-    def __init__(self, store: MachineStore, settings, source_factory=None, bridge_factory=None):
-        self.store = store
+class MachineRuntime:
+    """Uma máquina aberta: coletor sempre ligado, hub VNC e ponte CERHost (se tiver tela).
+
+    O objeto vive enquanto a máquina estiver cadastrada; um `reload` com mudança de conexão troca
+    o coletor/hub/ponte dentro dele, sem perder a contagem de quem está olhando. `version` sobe a
+    cada mudança de cadastro (quem assina o coletor confere permissão e coletor de novo).
+    """
+
+    def __init__(self, machine: Machine, settings, clock=time.monotonic):
+        self.machine = machine
         self.settings = settings
-        self.source_factory = source_factory  # testes: fábrica(machine) -> fonte
-        self.bridge_factory = bridge_factory  # testes: fábrica(machine) -> ponte (sem Wine/Xvfb)
-        self.accounts: AccountStore | None = None  # definido em build_manager
-        self.machine: Machine | None = None
+        self.clock = clock
         self.collector: Collector | None = None
         self.hub: VncHub | None = None
-        self.bridge: CerhostBridge | None = None  # tela da Beckhoff (só com ads e tela ligada)
-        self._bridge_task: asyncio.Task | None = None
-        self.close_timeout = CLOSE_TIMEOUT  # limite do desligamento da máquina anterior
-        self._lock = asyncio.Lock()
-        self._probes: dict[int, tuple[float | None, float]] = {}  # id -> (latência ms, ts)
-        self._status_task: asyncio.Task | None = None
+        self.bridge = None
+        self.bridge_task: asyncio.Task | None = None
+        self.viewers = 0
+        self.version = 0
+        self.closed = False
+        self._idle_since: float | None = None  # None = ainda tem gente (ou nunca teve: ocioso)
+
+    @property
+    def fast_seconds(self) -> float:
+        return self.settings.poll_seconds
+
+    @property
+    def idle_seconds(self) -> float:
+        return getattr(self.settings, "idle_poll_seconds", 10)
+
+    @property
+    def linger_seconds(self) -> float:
+        return getattr(self.settings, "viewer_linger_seconds", 60)
+
+    def wanted_poll(self) -> float:
+        if self.viewers > 0:
+            return self.fast_seconds
+        if self._idle_since is not None and self.clock() - self._idle_since < self.linger_seconds:
+            return self.fast_seconds
+        return self.idle_seconds
+
+    def tick(self) -> None:
+        """Aplica no coletor o intervalo que vale agora."""
+        if self.collector is not None:
+            self.collector.set_poll_seconds(self.wanted_poll())
+
+    def enter(self) -> None:
+        self.viewers += 1
+        self._idle_since = None
+        self.tick()
+
+    def leave(self) -> None:
+        if self.viewers <= 0:
+            return
+        self.viewers -= 1
+        if self.viewers == 0:
+            self._idle_since = self.clock()
+        self.tick()
+
+    def changed(self, old: Collector | None = None) -> None:
+        """Cadastro mudou: quem assina o coletor (o atual e o `old`, já trocado) acorda e confere
+        permissão e coletor de novo. Esse aviso nunca vai para o navegador."""
+        self.version += 1
+        for c in {id(x): x for x in (old, self.collector) if x is not None}.values():
+            c.notify({"_fleet": self.version})
+
+
+class Fleet:
+    def __init__(self, store: MachineStore, settings, accounts=None, source_factory=None,
+                 bridge_factory=None, clock=time.monotonic):
+        self.store = store
+        self.settings = settings
+        self.accounts = accounts  # o app define na subida se vier None
+        self.source_factory = source_factory  # testes: fábrica(machine) -> fonte
+        self.bridge_factory = bridge_factory  # testes: fábrica(machine) -> ponte (sem Wine/Xvfb)
+        self.clock = clock
+        self.close_timeout = CLOSE_TIMEOUT
+        self.tick_interval = TICK_INTERVAL
+        self._runtimes: dict[int, MachineRuntime] = {}
+        self._locks: dict[int, asyncio.Lock] = {}
+        self._probes: dict[int, tuple[float | None, float]] = {}  # id -> (latência ms, ts) do teste
+        self._tick_task: asyncio.Task | None = None
 
     # ---- ciclo de vida --------------------------------------------------
     async def start(self) -> None:
-        active = self.store.active_id()
-        if active is not None and self.store.get(active) is not None:
-            try:
-                await self.activate(active, at_startup=True)
-            except Exception:  # o servidor precisa subir mesmo sem a máquina ativa
-                log.exception("falha ao abrir a máquina ativa %s", active)
-        self._status_task = asyncio.create_task(self._status_loop(), name="status-maquinas")
+        for m in self.store.list():
+            await self.add(m.id)
+        self._tick_task = asyncio.create_task(self._tick_loop(), name="frota-intervalos")
 
     async def stop(self) -> None:
-        if self._status_task:
-            self._status_task.cancel()
+        if self._tick_task:
+            self._tick_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
-                await self._status_task
-            self._status_task = None
-        async with self._lock:
-            await self._close_current()
+                await self._tick_task
+            self._tick_task = None
+        for mid in list(self._runtimes):
+            await self.remove(mid)
 
-    # ---- troca ----------------------------------------------------------
+    def runtime(self, machine_id: int) -> MachineRuntime | None:
+        return self._runtimes.get(machine_id)
+
+    def runtimes(self) -> list[MachineRuntime]:
+        return list(self._runtimes.values())
+
+    def _lock(self, machine_id: int) -> asyncio.Lock:
+        return self._locks.setdefault(machine_id, asyncio.Lock())
+
+    async def _tick_loop(self) -> None:
+        while True:
+            await asyncio.sleep(self.tick_interval)
+            for rt in list(self._runtimes.values()):
+                try:
+                    rt.tick()
+                except Exception:
+                    log.exception("falha ao ajustar o intervalo de %s", rt.machine.name)
+
+    # ---- cadastro -------------------------------------------------------
+    async def add(self, machine_id: int) -> MachineRuntime | None:
+        """Abre a máquina recém-cadastrada (ou já aberta: devolve a atual). Falha não derruba nada."""
+        async with self._lock(machine_id):
+            rt = self._runtimes.get(machine_id)
+            if rt is not None:
+                return rt
+            m = self.store.get(machine_id)
+            if m is None:
+                return None
+            rt = MachineRuntime(m, self.settings, self.clock)
+            try:
+                await self._open(rt)
+            except Exception:  # o servidor (e as outras máquinas) seguem sem esta
+                log.exception("falha ao abrir a máquina %s (id %s)", m.name, m.id)
+                return None
+            self._runtimes[machine_id] = rt
+            log.info("máquina aberta: %s (id %s)", m.name, m.id)
+            return rt
+
+    async def reload(self, machine_id: int, connection_changed: bool) -> None:
+        """Cadastro mudou. Só conexão (IP, portas, tipo, senhas) reabre; nome/cliente/notas só atualizam."""
+        async with self._lock(machine_id):
+            rt = self._runtimes.get(machine_id)
+            m = self.store.get(machine_id)
+            if rt is None or m is None:
+                return
+            rt.machine = m
+            if not connection_changed:
+                if rt.hub is not None:
+                    rt.hub.name = m.name
+                rt.changed()
+                return
+            old = rt.collector
+            await self._close_parts(rt, REOPEN_REASON)
+            try:
+                await self._open(rt)
+            except Exception:
+                log.exception("falha ao reabrir a máquina %s (id %s)", m.name, m.id)
+                rt.closed = True
+                self._runtimes.pop(machine_id, None)
+            rt.changed(old)  # só agora: quem assina o antigo passa direto para o novo
+
+    async def remove(self, machine_id: int) -> None:
+        """Fecha coletor, hub e ponte da máquina; quem estava olhando é desconectado."""
+        async with self._lock(machine_id):
+            rt = self._runtimes.pop(machine_id, None)
+            self._probes.pop(machine_id, None)
+            if rt is None:
+                return
+            rt.closed = True
+            old = rt.collector
+            await self._close_parts(rt, REMOVE_REASON)
+            rt.changed(old)
+        self._locks.pop(machine_id, None)
+
+    # ---- abrir / fechar -------------------------------------------------
     def build_source(self, m: Machine):
         if self.source_factory is not None:
             return self.source_factory(m)
@@ -76,14 +215,14 @@ class MachineManager:
         cache = str(Path(self.settings.machines_dir) / f"{m.id}_tags.json")
         return OpcUaSource(m.opcua_url, m.effective_namespace, cache_file=cache)
 
-    def _new_collector(self, m: Machine) -> Collector:
+    def _new_collector(self, m: Machine, poll: float) -> Collector:
         s = self.settings
         mdir = Path(s.machines_dir)
         mdir.mkdir(parents=True, exist_ok=True)
         storage = Storage(str(mdir / f"{m.id}.db"))
         try:
             source = self.build_source(m)
-            return Collector(source, storage, s.poll_seconds, s.full_poll_seconds, s.retention_days)
+            return Collector(source, storage, poll, s.full_poll_seconds, s.retention_days)
         except Exception:
             storage.close()
             raise
@@ -137,8 +276,27 @@ class MachineManager:
                 log.exception("falha ao subir a tela da Beckhoff")
         return asyncio.create_task(run(), name="ponte-cerhost")
 
+    async def _open(self, rt: MachineRuntime) -> None:
+        """Liga coletor (não espera a conexão), hub e ponte da máquina do runtime."""
+        m = rt.machine
+        collector = self._new_collector(m, rt.wanted_poll())
+        hub = bridge = None
+        try:
+            if m.kind == "ads" and self._wants_screen(m):
+                bridge = self.build_bridge(m)
+            hub = self._new_hub(m, bridge)
+            collector.start()  # o coletor continua tentando sozinho
+        except BaseException:
+            collector.storage.close()
+            if hub is not None:
+                await hub.close()
+            raise
+        rt.collector, rt.hub, rt.bridge = collector, hub, bridge
+        if bridge is not None:
+            rt.bridge_task = self._start_bridge(bridge)  # não espera: o hub reconecta sozinho
+
     async def _bounded(self, what: str, coro) -> None:
-        """Desligamento com limite de tempo: máquina "meio aberta" não trava a troca."""
+        """Desligamento com limite de tempo: máquina "meio aberta" não trava as outras ações."""
         try:
             await asyncio.wait_for(coro, self.close_timeout)
         except asyncio.TimeoutError:
@@ -146,30 +304,25 @@ class MachineManager:
         except Exception:
             log.exception("falha ao fechar %s", what)
 
-    async def _close_current(self) -> None:
-        old_c, old_h = self.collector, self.hub
-        old_b, old_bt = self.bridge, self._bridge_task
-        self.machine = self.collector = self.hub = self.bridge = self._bridge_task = None
+    async def _close_parts(self, rt: MachineRuntime, reason: str) -> None:
+        c, h, b, bt = rt.collector, rt.hub, rt.bridge, rt.bridge_task
+        rt.collector = rt.hub = rt.bridge = rt.bridge_task = None
         try:
-            if old_c is not None:
-                await self._bounded("coletor", old_c.stop())
+            if c is not None:
+                await self._bounded("coletor", c.stop())
         finally:
             try:
-                if old_c is not None:
-                    old_c.storage.close()
+                if c is not None:
+                    c.storage.close()
             finally:
                 try:
-                    if old_h is not None:
-                        await self._bounded("hub VNC", old_h.close(SWITCH_REASON))
+                    if h is not None:
+                        await self._bounded("hub VNC", h.close(reason))
                 finally:
-                    await self._close_bridge(old_b, old_bt)
+                    await self._close_bridge(b, bt)
 
     async def _close_bridge(self, bridge, task: asyncio.Task | None) -> None:
-        """Encerra a ponte (CERHost, x11vnc, Openbox, Xvfb), mesmo no meio da subida.
-
-        Primeiro cancela a tarefa de subida (se ela nem começou, não começa mais: nada sobe depois
-        do stop); depois o stop da ponte, que cancela o vigia e derruba os processos.
-        """
+        """Encerra a ponte (CERHost, x11vnc, Openbox, Xvfb), mesmo no meio da subida."""
         try:
             if task is not None and not task.done():
                 task.cancel()
@@ -179,69 +332,17 @@ class MachineManager:
             if bridge is not None:
                 await self._bounded("tela da Beckhoff", bridge.stop())
 
-    async def activate(self, machine_id: int, at_startup: bool = False) -> Machine:
-        """Abre a máquina (fechando a anterior).
-
-        Só o hub aberto na subida do servidor deixa a porta VNC comum assumir o controle no primeiro
-        toque. Depois de uma troca, um Espelho IHM que reconecta sozinho cairia na outra máquina:
-        ali a porta fica só visualização (operar continua possível pela Tela ao vivo).
-        """
-        async with self._lock:
-            m = self.store.get(machine_id)
-            if m is None:
-                raise KeyError(machine_id)  # antes de derrubar a ativa
-            old_c = self.collector
-            if old_c is not None:
-                old_c.notify({"type": "machine_changed", "machine_id": machine_id})
-            await self._close_current()
-            collector = self._new_collector(m)
-            hub = bridge = bridge_task = None
-            try:
-                if m.kind == "ads" and self._wants_screen(m):
-                    bridge = self.build_bridge(m)
-                hub = self._new_hub(m, bridge)
-                collector.start()  # não espera a conexão: o coletor continua tentando
-                if hub is not None and self.settings.vnc_tcp_port:
-                    try:
-                        await hub.start_tcp(self.settings.vnc_tcp_bind, self.settings.vnc_tcp_port,
-                                            auto_take=at_startup)
-                    except OSError as exc:
-                        log.warning("porta VNC %s indisponível (%s)", self.settings.vnc_tcp_port, exc)
-                self.store.set_active(machine_id)
-                if bridge is not None:
-                    bridge_task = self._start_bridge(bridge)  # não espera: o hub reconecta sozinho
-            except BaseException:
-                await collector.stop()
-                collector.storage.close()
-                if hub is not None:
-                    await hub.close()
-                await self._close_bridge(bridge, bridge_task)
-                raise
-            self.machine, self.collector, self.hub = m, collector, hub
-            self.bridge, self._bridge_task = bridge, bridge_task
-            log.info("máquina ativa: %s (id %s)", m.name, m.id)
-            return m
-
-    async def refresh(self, machine_id: int) -> None:
-        """Cadastro mudou sem mexer na conexão (nome, cliente, notas): atualiza sem reabrir."""
-        async with self._lock:
-            if self.machine is not None and self.machine.id == machine_id:
-                m = self.store.get(machine_id)
-                if m is not None:
-                    self.machine = m
-                    if self.hub is not None:
-                        self.hub.name = m.name
-
     # ---- status ---------------------------------------------------------
     def status_of(self, machine_id: int) -> dict:
         last = self._probes.get(machine_id)
         latency, checked = (last[0], last[1]) if last else (None, None)
-        c = self.collector
-        if self.machine is not None and self.machine.id == machine_id and c is not None:
-            return {"online": c.connected and not c.stale, "latency_ms": latency,
-                    "checked": checked, "state": c.machine_state()}
-        return {"online": None if last is None else latency is not None,
-                "latency_ms": latency, "checked": checked}
+        rt = self._runtimes.get(machine_id)
+        c = rt.collector if rt is not None else None
+        if c is None:
+            return {"online": None, "state": None, "latency_ms": latency, "checked": checked,
+                    "active_alarms": 0}
+        return {"online": c.connected and not c.stale, "state": c.machine_state(),
+                "latency_ms": latency, "checked": checked, "active_alarms": len(c.active_alarms)}
 
     async def probe(self, host: str, port: int, timeout: float = PROBE_TIMEOUT) -> float | None:
         t0 = time.perf_counter()
@@ -256,32 +357,8 @@ class MachineManager:
         return latency
 
     async def check(self, m: Machine) -> float | None:
-        """Sonda uma máquina agora e guarda o resultado, para a lista mostrar o mesmo que o teste manual."""
+        """Teste manual (TCP) de uma máquina; a lista passa a mostrar a latência medida."""
         latency = await self.probe(m.host, m.status_port, PROBE_TIMEOUT)
         if self.store.get(m.id) is not None:  # pode ter sido apagada durante o teste
             self._probes[m.id] = (latency, time.time())
         return latency
-
-    async def probe_all(self) -> None:
-        """Sonda as outras máquinas: a aberta já tem o coletor, e a simulada não tem rede."""
-        machines = self.store.list()
-        active = self.machine.id if self.machine is not None else None
-        targets = [m for m in machines if m.kind != "demo" and m.id != active]
-        results = await asyncio.gather(
-            *(self.probe(m.host, m.status_port) for m in targets), return_exceptions=True)
-        now = time.time()
-        for m, r in zip(targets, results):
-            self._probes[m.id] = (r if isinstance(r, float) else None, now)
-        keep = {m.id for m in machines}
-        for gone in [i for i in self._probes if i not in keep]:
-            del self._probes[gone]
-
-    async def _status_loop(self) -> None:
-        while True:
-            try:
-                await self.probe_all()
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                log.exception("falha no laço de status")
-            await asyncio.sleep(PROBE_INTERVAL)

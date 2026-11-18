@@ -46,6 +46,7 @@ class Collector:
         self._subscribers: set[asyncio.Queue] = set()
         self._watched: dict[str, float] = {}
         self._task: asyncio.Task | None = None
+        self._wake = asyncio.Event()
 
     # ---- ciclo de vida --------------------------------------------------
     def start(self) -> None:
@@ -59,6 +60,26 @@ class Collector:
             except asyncio.CancelledError:
                 pass
         await self.source.close()
+
+    def set_poll_seconds(self, seconds: float) -> None:
+        """Novo intervalo entre leituras; acorda o laço se estiver dormindo (alguém entrou: ler já)."""
+        if seconds == self.poll_seconds:
+            return
+        self.poll_seconds = seconds
+        self._wake.set()
+
+    async def _pause(self, started: float) -> None:
+        """Dorme `poll_seconds` desde `started` (fim da leitura); trocar o intervalo recalcula na hora."""
+        loop = asyncio.get_running_loop()
+        while True:
+            self._wake.clear()
+            remaining = started + self.poll_seconds - loop.time()
+            if remaining <= 0:
+                return
+            try:
+                await asyncio.wait_for(self._wake.wait(), remaining)
+            except asyncio.TimeoutError:
+                return
 
     def subscribe(self) -> asyncio.Queue:
         q: asyncio.Queue = asyncio.Queue(maxsize=5)
@@ -99,9 +120,10 @@ class Collector:
                 self.connected = True
                 self.last_error = None
                 log.info("conectado: %d variáveis", len(self.tags))
+                loop = asyncio.get_running_loop()
                 while True:
                     await self.poll_once()
-                    await asyncio.sleep(self.poll_seconds)
+                    await self._pause(loop.time())
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # rede instável: registra e tenta de novo

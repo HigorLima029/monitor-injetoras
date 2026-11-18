@@ -7,7 +7,7 @@ from starlette.websockets import WebSocketDisconnect
 from app import auth, main
 from app.auth import LoginLimiter
 from app.machines import Machine, MachineStore
-from app.manager import MachineManager
+from app.manager import Fleet
 from app.security import new_totp_secret, totp_code
 
 from .conftest import HttpsClient
@@ -16,7 +16,7 @@ from .conftest import HttpsClient
 def _settings(tmp_path):
     return SimpleNamespace(
         machines_dir=str(tmp_path / "machines"), poll_seconds=0.05, full_poll_seconds=0.2,
-        retention_days=7, vnc_tcp_port=0, vnc_tcp_bind="127.0.0.1", vnc_control_timeout=300,
+        retention_days=7, vnc_control_timeout=300,
         vnc_audit_path=None, ads_local_net_id="",
     )
 
@@ -25,13 +25,13 @@ def _settings(tmp_path):
 def client(tmp_path, accounts):
     store = MachineStore(str(tmp_path / "m.db"))
     store.set_active(store.add(Machine(None, "A", "demo", "127.0.0.1")).id)
-    main.app.state.manager = MachineManager(store, _settings(tmp_path))
+    main.app.state.fleet = Fleet(store, _settings(tmp_path))
     accounts.add_user("ana", "Ana", "tecnico", "senha12345")
     try:
         with HttpsClient(main.app) as c:
             yield c
     finally:
-        del main.app.state.manager
+        del main.app.state.fleet
 
 
 def login(client, username, password):
@@ -39,7 +39,8 @@ def login(client, username, password):
 
 
 def test_rotas_exigem_login(client):
-    for path in ("/api/machines", "/api/info", "/api/live", "/api/me", "/api/vnc/status"):
+    for path in ("/api/machines", "/api/machines/1/info", "/api/machines/1/live", "/api/me",
+                 "/api/vnc/status?machine=1"):
         r = client.get(path)
         assert r.status_code == 401, path
         assert r.json()["detail"] == "Faça login."
@@ -179,7 +180,7 @@ def test_sem_docs_publicas(client):
 def test_websockets_registrados_por_app(client):
     login(client, "ana", "senha12345")
     reg = auth.state(main.app).sockets
-    with client.websocket_connect("/ws") as ws:
+    with client.websocket_connect("/ws/machines/1") as ws:
         ws.receive_json()
         token = client.cookies.get("monitor_sessao")
         assert reg.tokens() == [token] and len(reg.sockets(token)) == 1
@@ -279,7 +280,7 @@ def test_origin_de_outro_site_bloqueado(client):
 
 
 def test_ws_sem_login_fecha_4401(client):
-    for path in ("/ws", "/ws/vnc"):
+    for path in ("/ws/machines/1", "/ws/vnc?machine=1"):
         with client.websocket_connect(path) as ws:
             with pytest.raises(WebSocketDisconnect) as exc:
                 ws.receive_text()
@@ -288,13 +289,13 @@ def test_ws_sem_login_fecha_4401(client):
 
 def test_ws_com_login_funciona(client):
     login(client, "ana", "senha12345")
-    with client.websocket_connect("/ws") as ws:
+    with client.websocket_connect("/ws/machines/1") as ws:
         assert "status" in ws.receive_json()
 
 
 def test_ws_de_outra_origem_recusado(client):
     login(client, "ana", "senha12345")
-    with client.websocket_connect("/ws", headers={"Origin": "https://evil.example"}) as ws:
+    with client.websocket_connect("/ws/machines/1", headers={"Origin": "https://evil.example"}) as ws:
         with pytest.raises(WebSocketDisconnect) as exc:
             ws.receive_text()
     assert exc.value.code == 4403
@@ -303,7 +304,7 @@ def test_ws_de_outra_origem_recusado(client):
 def test_usuario_desativado_perde_ws_em_ate_10s(client, accounts, monkeypatch):
     monkeypatch.setattr(auth, "SWEEP_SECONDS", 0.1)
     login(client, "ana", "senha12345")
-    with client.websocket_connect("/ws") as ws:
+    with client.websocket_connect("/ws/machines/1") as ws:
         ws.receive_json()
         accounts.update_user(accounts.get_by_username("ana").id, active=False)
         start = time.monotonic()
@@ -316,7 +317,7 @@ def test_usuario_desativado_perde_ws_em_ate_10s(client, accounts, monkeypatch):
 
 def test_logout_fecha_ws(client):
     login(client, "ana", "senha12345")
-    with client.websocket_connect("/ws") as ws:
+    with client.websocket_connect("/ws/machines/1") as ws:
         ws.receive_json()
         assert client.post("/api/logout").status_code == 204
         with pytest.raises(WebSocketDisconnect) as exc:
@@ -346,7 +347,7 @@ def test_frontend_publico(client):
 
 def test_client_as(client_as, tmp_path, accounts):
     store = MachineStore(str(tmp_path / "m2.db"))
-    main.app.state.manager = MachineManager(store, _settings(tmp_path))
+    main.app.state.fleet = Fleet(store, _settings(tmp_path))
     try:
         mae = client_as("mae")
         cli = client_as("cliente")
@@ -355,4 +356,4 @@ def test_client_as(client_as, tmp_path, accounts):
         assert me["role"] == "cliente" and me["client_id"] is not None
         assert mae.get("/api/me").json()["role"] == "mae"  # cookies separados
     finally:
-        del main.app.state.manager
+        del main.app.state.fleet

@@ -42,7 +42,11 @@ def _path(raw: str) -> str:
 class Settings:
     opcua_url: str = os.getenv("OPCUA_URL", "opc.tcp://10.202.148.102:4840")
     machine_name: str = os.getenv("MACHINE_NAME", "Injetora Chen Hsong (bancada)")
-    poll_seconds: float = float(os.getenv("POLL_SECONDS", "5"))
+    # leitura rápida enquanto alguém olha a máquina (dados ou tela)
+    poll_seconds: float = float(os.getenv("POLL_SECONDS", "2"))
+    # leitura sem ninguém olhando (economiza o 4G) e quanto tempo depois do último sair volta a ela
+    idle_poll_seconds: float = float(os.getenv("IDLE_POLL_SECONDS", "10"))
+    viewer_linger_seconds: float = float(os.getenv("VIEWER_LINGER_SECONDS", "60"))
     full_poll_seconds: float = float(os.getenv("FULL_POLL_SECONDS", "60"))
     simulate: bool = _bool("SIMULATE", False)
     db_path: str = _path(os.getenv("DB_PATH", "data/monitor.db"))
@@ -60,9 +64,6 @@ class Settings:
     vnc_control_password: str = os.getenv("VNC_CONTROL_PASSWORD", "")
     # segundos sem mexer ate o operador perder o controle
     vnc_control_timeout: float = float(os.getenv("VNC_CONTROL_TIMEOUT", "300"))
-    # porta VNC comum do hub, para o Espelho IHM ou outro cliente VNC (0 = desligada)
-    vnc_tcp_port: int = int(os.getenv("VNC_TCP_PORT", "5901"))
-    vnc_tcp_bind: str = os.getenv("VNC_TCP_BIND", "0.0.0.0")
     vnc_audit_path: str | None = _path(os.getenv("VNC_AUDIT_PATH", "data/vnc_audit.log"))
     # Cadastro de maquinas (SQLite) e historico/cache de tags por maquina
     config_db_path: str = _path(os.getenv("CONFIG_DB_PATH", "data/monitor_config.db"))

@@ -220,18 +220,18 @@ def test_ws_e_api_de_controle(tmp_path, monkeypatch, panel, client_as):
 
     from app import main
     from app.machines import Machine, MachineStore
-    from app.manager import MachineManager
+    from app.manager import Fleet
     from app.sources import SimulatedSource
 
     cfg = SimpleNamespace(
         machines_dir=str(tmp_path / "machines"), poll_seconds=1, full_poll_seconds=60,
-        retention_days=7, vnc_tcp_port=0, vnc_tcp_bind="127.0.0.1", vnc_control_timeout=300,
+        retention_days=7, vnc_control_timeout=300,
         vnc_audit_path=None, ads_local_net_id="")
     store = MachineStore(str(tmp_path / "m.db"))
-    store.set_active(store.add(Machine(
+    mid = store.add(Machine(
         None, "Painel", "em63", "127.0.0.1", vnc_enabled=True, vnc_port=panel.port,
-        vnc_view_password=VIEW, vnc_control_password=CONTROL)).id)
-    monkeypatch.setattr(main.app.state, "manager", MachineManager(store, cfg, source_factory=lambda m: SimulatedSource(seed=2)), raising=False)
+        vnc_view_password=VIEW, vnc_control_password=CONTROL)).id
+    monkeypatch.setattr(main.app.state, "fleet", Fleet(store, cfg, source_factory=lambda m: SimulatedSource(seed=2)), raising=False)
 
     def rfb(ws, password):
         assert ws.receive_bytes() == b"RFB 003.008\n"
@@ -244,21 +244,21 @@ def test_ws_e_api_de_controle(tmp_path, monkeypatch, panel, client_as):
         assert ws.receive_bytes()[:4] == struct.pack(">HH", 8, 6)
 
     client = client_as("mae")
-    assert client.get("/api/info").json()["vnc_control"] is True
-    with client.websocket_connect("/ws/vnc?sid=olho1", subprotocols=["binary"]) as ws:
+    assert client.get(f"/api/machines/{mid}/info").json()["vnc_control"] is True
+    with client.websocket_connect(f"/ws/vnc?machine={mid}&sid=olho1", subprotocols=["binary"]) as ws:
         rfb(ws, VIEW)
-        st = client.get("/api/vnc/status", params={"sid": "olho1"}).json()
+        st = client.get("/api/vnc/status", params={"machine": mid, "sid": "olho1"}).json()
         assert st["role"] == "view" and st["controller"] is None and "events" not in st
-        r = client.post("/api/vnc/control", json={"sid": "olho1", "action": "take"})
+        r = client.post(f"/api/vnc/control?machine={mid}", json={"sid": "olho1", "action": "take"})
         assert r.status_code == 403
-    with client.websocket_connect("/ws/vnc?sid=op1", subprotocols=["binary"]) as ws:
+    with client.websocket_connect(f"/ws/vnc?machine={mid}&sid=op1", subprotocols=["binary"]) as ws:
         rfb(ws, CONTROL)
-        r = client.post("/api/vnc/control", json={"sid": "op1", "action": "take"})
+        r = client.post(f"/api/vnc/control?machine={mid}", json={"sid": "op1", "action": "take"})
         assert r.status_code == 200 and r.json()["ok"]
-        st = client.get("/api/vnc/status", params={"sid": "op1"}).json()
+        st = client.get("/api/vnc/status", params={"machine": mid, "sid": "op1"}).json()
         assert st["controller"]["me"] is True and st["role"] == "control"
-        assert client.post("/api/vnc/control", json={"sid": "op1", "action": "release"}).json()["ok"]
-        assert client.get("/api/vnc/status", params={"sid": "op1"}).json()["controller"] is None
+        assert client.post(f"/api/vnc/control?machine={mid}", json={"sid": "op1", "action": "release"}).json()["ok"]
+        assert client.get("/api/vnc/status", params={"machine": mid, "sid": "op1"}).json()["controller"] is None
 
 
 def test_porta_tcp_sem_auto_assumir(panel):
@@ -316,39 +316,38 @@ def test_fechar_hub_manda_o_motivo():
     asyncio.run(run())
 
 
-def test_troca_de_maquina_avisa_o_navegador(tmp_path, monkeypatch, panel, client_as):
+def test_reconfigurar_maquina_avisa_o_navegador(tmp_path, monkeypatch, panel, client_as):
     from types import SimpleNamespace
 
     from starlette.websockets import WebSocketDisconnect
 
     from app import main
     from app.machines import Machine, MachineStore
-    from app.manager import MachineManager
+    from app.manager import Fleet
     from app.sources import SimulatedSource
 
     cfg = SimpleNamespace(
         machines_dir=str(tmp_path / "machines"), poll_seconds=1, full_poll_seconds=60,
-        retention_days=7, vnc_tcp_port=0, vnc_tcp_bind="127.0.0.1", vnc_control_timeout=300,
+        retention_days=7, vnc_control_timeout=300,
         vnc_audit_path=None, ads_local_net_id="")
     store = MachineStore(str(tmp_path / "m.db"))
-    a, b = (store.add(Machine(None, n, "em63", "127.0.0.1", vnc_enabled=True, vnc_port=panel.port,
-                              vnc_view_password=VIEW)).id for n in "AB")
-    store.set_active(a)
-    monkeypatch.setattr(main.app.state, "manager", MachineManager(
+    a = store.add(Machine(None, "A", "em63", "127.0.0.1", vnc_enabled=True, vnc_port=panel.port,
+                          vnc_view_password=VIEW)).id
+    monkeypatch.setattr(main.app.state, "fleet", Fleet(
         store, cfg, source_factory=lambda m: SimulatedSource(seed=2)), raising=False)
     client = client_as("mae")
-    with client.websocket_connect("/ws/vnc?sid=olho", subprotocols=["binary"]) as ws:
+    with client.websocket_connect(f"/ws/vnc?machine={a}&sid=olho", subprotocols=["binary"]) as ws:
         assert ws.receive_bytes() == b"RFB 003.008\n"
         ws.send_bytes(b"RFB 003.008\n")
         assert ws.receive_bytes() == b"\x01\x02"
         ws.send_bytes(b"\x02")
         ws.send_bytes(vnc_response(VIEW, ws.receive_bytes()))
         assert ws.receive_bytes() == b"\x00\x00\x00\x00"
-        assert client.post(f"/api/machines/{b}/activate").status_code == 200
+        assert client.put(f"/api/machines/{a}", json={"opcua_port": 4999}).status_code == 200
         with pytest.raises(WebSocketDisconnect) as exc:
             for _ in range(20):
                 ws.receive_bytes()
-        assert exc.value.reason == "máquina trocada"
+        assert exc.value.reason == "máquina reconfigurada"
 
 
 def test_porta_do_painel_segue_o_provedor():
@@ -395,22 +394,22 @@ def test_usuario_desativado_perde_a_tela_ao_vivo(tmp_path, monkeypatch, panel, c
 
     from app import auth, main
     from app.machines import Machine, MachineStore
-    from app.manager import MachineManager
+    from app.manager import Fleet
     from app.sources import SimulatedSource
 
     monkeypatch.setattr(auth, "SWEEP_SECONDS", 0.1)
     cfg = SimpleNamespace(
         machines_dir=str(tmp_path / "machines"), poll_seconds=1, full_poll_seconds=60,
-        retention_days=7, vnc_tcp_port=0, vnc_tcp_bind="127.0.0.1", vnc_control_timeout=300,
+        retention_days=7, vnc_control_timeout=300,
         vnc_audit_path=None, ads_local_net_id="")
     store = MachineStore(str(tmp_path / "m.db"))
-    store.set_active(store.add(Machine(None, "Painel", "em63", "127.0.0.1", vnc_enabled=True,
-                                       vnc_port=panel.port, vnc_view_password=VIEW)).id)
-    monkeypatch.setattr(main.app.state, "manager", MachineManager(
+    mid = store.add(Machine(None, "Painel", "em63", "127.0.0.1", vnc_enabled=True,
+                            vnc_port=panel.port, vnc_view_password=VIEW)).id
+    monkeypatch.setattr(main.app.state, "fleet", Fleet(
         store, cfg, source_factory=lambda m: SimulatedSource(seed=2)), raising=False)
     client = client_as("tecnico")
     uid = client.get("/api/me").json()["id"]
-    with client.websocket_connect("/ws/vnc?sid=olho", subprotocols=["binary"]) as ws:
+    with client.websocket_connect(f"/ws/vnc?machine={mid}&sid=olho", subprotocols=["binary"]) as ws:
         assert ws.receive_bytes() == b"RFB 003.008\n"
         ws.send_bytes(b"RFB 003.008\n")
         assert ws.receive_bytes() == b"\x01\x02"

@@ -71,34 +71,35 @@ def test_api_com_simulador(tmp_path, monkeypatch, client_as):
     from types import SimpleNamespace
 
     from app.machines import Machine, MachineStore
-    from app.manager import MachineManager
+    from app.manager import Fleet
 
     cfg = SimpleNamespace(
-        machines_dir=str(tmp_path / "machines"), poll_seconds=0.05, full_poll_seconds=0.2,
-        retention_days=7, vnc_tcp_port=0, vnc_tcp_bind="127.0.0.1", vnc_control_timeout=300,
+        machines_dir=str(tmp_path / "machines"), poll_seconds=0.05, idle_poll_seconds=0.05,
+        full_poll_seconds=0.2, retention_days=7, vnc_control_timeout=300,
         vnc_audit_path=None, ads_local_net_id="")
     store = MachineStore(str(tmp_path / "m.db"))
-    store.set_active(store.add(Machine(None, "Demo", "demo", "127.0.0.1")).id)
-    monkeypatch.setattr(main.app.state, "manager", MachineManager(
+    mid = store.add(Machine(None, "Demo", "demo", "127.0.0.1")).id
+    monkeypatch.setattr(main.app.state, "fleet", Fleet(
         store, cfg, source_factory=lambda m: SimulatedSource(cycle_seconds=0.05, seed=1)), raising=False)
     client = client_as("mae")
-    col = main.app.state.manager.collector
+    col = main.app.state.fleet.runtime(mid).collector
+    base = f"/api/machines/{mid}"
     time.sleep(0.6)
-    live = client.get("/api/live").json()
+    live = client.get(f"{base}/live").json()
     assert live["status"]["connected"] is True
     assert "TempZ1Now" in live["values"]
-    hist = client.get("/api/history", params={"tags": "ProductionCount", "minutes": 5}).json()
+    hist = client.get(f"{base}/history", params={"tags": "ProductionCount", "minutes": 5}).json()
     assert hist["series"]["ProductionCount"]
-    prod = client.get("/api/production", params={"hours": 1}).json()
+    prod = client.get(f"{base}/production", params={"hours": 1}).json()
     assert prod["produced"] > 0
-    assert client.get("/api/alarms").json()["monitored"] > 50
-    tags = client.get("/api/tags", params={"q": "temp"}).json()
+    assert client.get(f"{base}/alarms").json()["monitored"] > 50
+    tags = client.get(f"{base}/tags", params={"q": "temp"}).json()
     assert all("temp" in r["tag"].lower() for r in tags["rows"])
-    vals = client.get("/api/values", params={"tags": "Clamp1Pres,Open4Pos,Hold2Time,Nada"}).json()
+    vals = client.get(f"{base}/values", params={"tags": "Clamp1Pres,Open4Pos,Hold2Time,Nada"}).json()
     assert vals["values"]["Clamp1Pres"] == 40.0 and vals["values"]["Open4Pos"] == 360.0
     assert vals["values"]["Nada"] is None
     assert "Hold2Time" in col.fast_tags
-    with client.websocket_connect("/ws") as ws:
+    with client.websocket_connect(f"/ws/machines/{mid}") as ws:
         assert "status" in ws.receive_json()
 
 
