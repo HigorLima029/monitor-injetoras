@@ -18,7 +18,7 @@ from .accounts import AccountStore, User, migrate_machine_clients
 from .collector import Collector, to_number
 from .config import settings
 from .machines import CONNECTION_FIELDS, Machine, MachineStore, seed_from_settings
-from .manager import Fleet, MachineRuntime, ScreenLimit
+from .manager import Fleet, MachineRuntime, ScreenLimit, ScreenUnavailable
 from .vnc_hub import WebSocketTransport
 from .tags import ADS_ZONES, ALARM_PREFIX, BARREL_ZONES, KPI_META, alarm_label, humanize
 
@@ -501,24 +501,28 @@ async def _ws_vnc(socket: WebSocket, user: User, machine_id: int, sid: str):
     if rt is None:
         await socket.close(code=WS_NAO_ENCONTRADA, reason=NAO_ENCONTRADA)
         return
+    fleet = _fleet()
     try:
-        hub = await _fleet().open_screen(machine_id)  # sob demanda (Beckhoff: sobe a ponte)
+        hub = await fleet.open_screen(machine_id)  # sob demanda (Beckhoff: sobe a ponte)
     except ScreenLimit as exc:
         await socket.close(code=WS_TENTE_DEPOIS, reason=_close_reason(str(exc)))
         return
+    except ScreenUnavailable as exc:
+        # Beckhoff sem as ferramentas no servidor: não adianta esperar, diz o que falta
+        text = authz.TELA_INDISPONIVEL if _hide(user) else str(exc)
+        await socket.close(code=1008, reason=_close_reason(text))
+        return
     if hub is None:
         await socket.close(code=1008, reason="Tela ao vivo desligada para esta máquina")
-        return
-    bridge = rt.bridge
-    if bridge is not None and bridge.state == "missing":
-        # Beckhoff sem as ferramentas no servidor: não adianta esperar, diz o que falta
-        text = authz.TELA_INDISPONIVEL if _hide(user) else (bridge.error or "Tela da Beckhoff indisponível")
-        await socket.close(code=1008, reason=_close_reason(text))
         return
     peer = socket.client.host if socket.client else "navegador"
     rt.enter()
     try:
         await hub.serve(WebSocketTransport(socket), sid or f"ws-{id(socket):x}", peer)
+    except Exception:
+        # a sessão nem chegou a funcionar: sem ninguém mais, a tela não segura a vaga
+        logging.getLogger(__name__).exception("falha na tela ao vivo de %s", rt.machine.name)
+        await fleet.screen_failed(machine_id, hub)
     finally:
         rt.leave()
 
@@ -548,8 +552,8 @@ def _closed_screen_status(rt: MachineRuntime) -> dict:
     out = {"open": False, "panel": {"state": "idle", "mode": "view", "error": None}, "viewers": 0,
            "role": None, "control_available": m.kind == "ads" or bool(m.vnc_control_password),
            "timeout": _fleet().settings.vnc_control_timeout, "controller": None}
-    if m.kind == "ads":
-        out["bridge"] = {"state": "stopped", "error": None}
+    if m.kind == "ads":  # a última ponte que não pôde subir diz o motivo (ex.: o que falta)
+        out["bridge"] = dict(rt.last_bridge or {"state": "stopped", "error": None})
     return out
 
 

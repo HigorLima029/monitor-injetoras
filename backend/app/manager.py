@@ -45,6 +45,10 @@ class ScreenLimit(Exception):
         super().__init__(message)
 
 
+class ScreenUnavailable(Exception):
+    """A tela não tem como funcionar (ex.: faltam ferramentas no servidor); a mensagem diz o quê."""
+
+
 class MachineRuntime:
     """Uma máquina aberta: coletor sempre ligado; hub VNC e ponte CERHost só com a tela aberta.
 
@@ -63,6 +67,7 @@ class MachineRuntime:
         self.bridge_task: asyncio.Task | None = None
         self.display: int | None = None  # tela virtual da ponte (Beckhoff), enquanto viva
         self.screen_idle_since: float | None = None  # hub aberto e sem ninguém desde
+        self.last_bridge: dict | None = None  # estado da última ponte que não pôde funcionar
         self.viewers = 0
         self.version = 0
         self.closed = False
@@ -137,7 +142,10 @@ class Fleet:
         self._probes: dict[int, tuple[float | None, float]] = {}  # id -> (latência ms, ts) do teste
         self._tick_task: asyncio.Task | None = None
         self._idle_task: asyncio.Task | None = None
-        self._displays: set[int] = set()  # telas virtuais em uso por pontes vivas
+        # telas virtuais reservadas: da abertura até a ponte terminar de fechar (é o que conta
+        # no limite, para uma tela ainda morrendo não deixar outra subir junto)
+        self._displays: set[int] = set()
+        self._live_bridges: list = []  # pontes da frota, até terminarem de fechar
 
     # ---- ciclo de vida --------------------------------------------------
     async def start(self) -> None:
@@ -300,10 +308,13 @@ class Fleet:
         s = self.settings
         if display is None:
             display = getattr(s, "cerhost_display", 99)
-        return CerhostBridge(m.host, display, getattr(s, "cerhost_exe", ""),
-                             m.vnc_view_password, m.vnc_control_password,
-                             wineprefix=getattr(s, "cerhost_wineprefix", ""),
-                             pidfile=self._pidfile_for(display))
+        bridge = CerhostBridge(m.host, display, getattr(s, "cerhost_exe", ""),
+                               m.vnc_view_password, m.vnc_control_password,
+                               wineprefix=getattr(s, "cerhost_wineprefix", ""),
+                               pidfile=self._pidfile_for(display))
+        # prefixo Wine compartilhado: `wineserver -k` só sem outra ponte viva
+        bridge.may_kill_wineserver = lambda: not any(b is not bridge for b in self._live_bridges)
+        return bridge
 
     def _alloc_display(self) -> int:
         """Menor tela virtual livre de `cerhost_display` em diante."""
@@ -312,9 +323,6 @@ class Fleet:
             d += 1
         self._displays.add(d)
         return d
-
-    def _bridges_alive(self) -> int:
-        return sum(1 for rt in self._runtimes.values() if rt.bridge is not None)
 
     def _new_hub(self, m: Machine, bridge) -> VncHub | None:
         """Hub da tela ao vivo. Beckhoff (ads): o painel é o x11vnc da ponte, em 127.0.0.1.
@@ -362,12 +370,15 @@ class Fleet:
         """Hub da tela ao vivo da máquina, aberto agora se preciso (Beckhoff: com a sua ponte).
 
         None = máquina fora da frota ou sem tela. `ScreenLimit` = já há `cerhost_max_screens`
-        pontes vivas (B&R não conta: não sobe nada no servidor)."""
+        telas da Beckhoff reservadas (B&R não conta: não sobe nada no servidor).
+        `ScreenUnavailable` = a ponte não tem como funcionar (faltam ferramentas): a tela é
+        fechada na hora, sem segurar a vaga, e `rt.last_bridge` guarda o motivo para o status."""
         async with self._lock(machine_id):
             rt = self._runtimes.get(machine_id)
             if rt is None or rt.closed:
                 return None
-            if rt.hub is not None and not rt.hub._closed:
+            if rt.hub is not None and not rt.hub.closed:
+                rt.screen_idle_since = self.clock()  # vai ser usada: o prazo recomeça
                 return rt.hub
             m = rt.machine
             if not self._wants_screen(m):
@@ -375,21 +386,31 @@ class Fleet:
             bridge = display = None
             if m.kind == "ads":
                 # contar e reservar sem nenhum await no meio: outra máquina não passa junto
-                if self._bridges_alive() >= self.max_screens:
+                if len(self._displays) >= self.max_screens:
                     raise ScreenLimit()
                 display = self._alloc_display()
-                try:
+            try:
+                if display is not None:
                     bridge = self.build_bridge(m, display)
-                except BaseException:
+                hub = self._new_hub(m, bridge)
+            except BaseException:
+                if display is not None:
                     self._displays.discard(display)
-                    raise
-            hub = self._new_hub(m, bridge)
+                raise
             rt.hub, rt.bridge, rt.display = hub, bridge, display
             rt.screen_idle_since = self.clock()
+            rt.last_bridge = None
             if bridge is not None:
+                self._live_bridges.append(bridge)
                 rt.bridge_task = self._start_bridge(bridge)  # não espera: o hub reconecta sozinho
                 # deixa a subida correr até a primeira espera: falta de ferramenta já aparece
                 await asyncio.sleep(0)
+                if bridge.state == "missing":
+                    message = bridge.error or "Tela da Beckhoff indisponível"
+                    log.info("tela ao vivo de %s não tem como subir; vaga liberada", m.name)
+                    await self._close_screen(rt, "tela indisponível")
+                    rt.last_bridge = {"state": "missing", "error": message}
+                    raise ScreenUnavailable(message)
             log.info("tela ao vivo aberta: %s%s", m.name,
                      f" (tela virtual :{display})" if display is not None else "")
             return hub
@@ -400,6 +421,16 @@ class Fleet:
             rt = self._runtimes.get(machine_id)
             if rt is not None:
                 await self._close_screen(rt, reason)
+
+    async def screen_failed(self, machine_id: int, hub: VncHub) -> None:
+        """A sessão de `hub` caiu com erro: se ninguém mais estiver nele, fecha já (sem esperar
+        `screen_idle_seconds` segurando a vaga e a tela virtual)."""
+        async with self._lock(machine_id):
+            rt = self._runtimes.get(machine_id)
+            if rt is None or rt.hub is not hub or hub.sessions:
+                return
+            log.info("tela ao vivo de %s falhou sem ninguém assistindo: fechando", rt.machine.name)
+            await self._close_screen(rt, "tela indisponível")
 
     async def close_idle_screens(self) -> None:
         """Fecha as telas sem ninguém há `screen_idle_seconds` (o laço da frota chama)."""
@@ -438,6 +469,9 @@ class Fleet:
             try:
                 await self._close_bridge(b, bt)
             finally:
+                # só agora (ponte já encerrada): libera a vaga, a tela virtual e o wineserver
+                if b is not None:
+                    self._live_bridges = [x for x in self._live_bridges if x is not b]
                 if d is not None:
                     self._displays.discard(d)
 

@@ -209,7 +209,7 @@ class CerhostBridge:
 
     def __init__(self, host: str, display: int, cerhost_exe: str, view_password: str = "",
                  control_password: str = "", runner=None, wineprefix: str = "",
-                 pidfile: str = "") -> None:
+                 pidfile: str = "", may_kill_wineserver=None) -> None:
         self.host = host
         self.display = display
         self.cerhost_exe = cerhost_exe
@@ -223,6 +223,10 @@ class CerhostBridge:
         self._control_password = control_password
         # prefixo Wine DEDICADO (opcional): so com ele o stop roda `wineserver -k`
         self.wineprefix = wineprefix
+        # O prefixo e compartilhado por todas as pontes (um prefixo novo por tela abriria as
+        # janelas de primeira execucao do Wine, sem ninguem para clicar): `wineserver -k` so
+        # quando nenhuma outra ponte estiver viva. A frota troca esta funcao.
+        self.may_kill_wineserver = may_kill_wineserver or (lambda: True)
         self.runner = runner or SubprocessRunner()
         # arquivo de pids desta tela virtual (ex.: data/cerhost_99.pids): as sobras de um Monitor que caiu feio
         self.pidfile = pidfile
@@ -811,8 +815,12 @@ class CerhostBridge:
                     with contextlib.suppress(FileNotFoundError):
                         (Path(self._tmpdir) / "senhas").unlink()
             if name == "cerhost" and proc is not None and self.wineprefix:
-                # so num prefixo dedicado: no padrao mataria outros programas Wine do usuario
-                await self._cmd(["wineserver", "-k"])
+                # so num prefixo dedicado (no padrao mataria outros programas Wine do usuario) e
+                # so sem outra ponte viva no mesmo prefixo (mataria o CERHost dela)
+                if self.may_kill_wineserver():
+                    await self._cmd(["wineserver", "-k"])
+                else:
+                    log.info("CERHost: outra tela da Beckhoff usa o prefixo Wine; sem wineserver -k")
         self._write_pidfile()
 
     def _drop_tmpdir(self) -> None:

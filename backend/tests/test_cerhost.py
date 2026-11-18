@@ -673,6 +673,27 @@ def test_wineprefix_dedicado_usa_wineserver_k(tmp_path, monkeypatch):
     assert runner.run_envs[i]["WINEPREFIX"] == prefix
 
 
+def test_wineserver_k_so_com_a_ultima_ponte(tmp_path, monkeypatch):
+    """Prefixo compartilhado: `wineserver -k` derrubaria o CERHost da outra máquina."""
+    prefix = str(tmp_path / "prefixo")
+    outra_viva = [True]
+    b1, r1 = make_bridge(tmp_path, monkeypatch, wineprefix=prefix)
+    b2, r2 = make_bridge(tmp_path, monkeypatch, wineprefix=prefix)
+    assert b1.may_kill_wineserver() is True  # padrão: ponte sozinha
+    b1.may_kill_wineserver = lambda: not outra_viva[0]
+    b2.may_kill_wineserver = lambda: True
+
+    async def go():
+        await b1.start()
+        await b2.start()
+        await b1.stop()  # a outra ainda vive: não mata o wineserver
+        await b2.stop()  # a última: mata
+
+    asyncio.run(go())
+    assert ["wineserver", "-k"] not in r1.commands
+    assert ["wineserver", "-k"] in r2.commands
+
+
 def test_stop_durante_start_nao_deixa_processo(tmp_path, monkeypatch):
     b, runner = make_bridge(tmp_path, monkeypatch, window_timeout=30)
     runner.spawn_delay["wine"] = 0.05  # cancelado no meio do spawn

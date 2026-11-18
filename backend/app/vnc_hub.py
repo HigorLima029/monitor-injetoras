@@ -329,6 +329,10 @@ class VncHub:
     def ready(self) -> bool:
         return self._ready.is_set()
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
     def current_port(self) -> int | None:
         return self.port_provider() if self.port_provider is not None else self.port
 

@@ -433,7 +433,8 @@ class FakeBridge:
     async def start(self):
         self.started += 1
         self.state = "starting"
-        await asyncio.sleep(self.start_delay)
+        if self.start_delay:
+            await asyncio.sleep(self.start_delay)
         self.state, self.error = self.final_state, self.final_error
 
     async def stop(self):
@@ -637,12 +638,16 @@ def test_stop_fecha_maquinas_travadas_em_paralelo(tmp_path):
 
 # ---- telas sob demanda (uma ponte por máquina, com limite) -----------------
 def _bk_real(tmp_path, n, clock=None, **kw):
-    """Frota com N Beckhoffs e a ponte de verdade sem CERHOST.exe (fica "missing": nada sobe)."""
+    """Frota com N Beckhoffs e a ponte de verdade (CerhostBridge), que não chega a subir nada:
+    a subida em segundo plano é trocada por uma tarefa vazia (sem Wine/Xvfb nos testes)."""
     s = _settings(tmp_path, cerhost_exe="", cerhost_display=99, cerhost_wineprefix="",
                   cerhost_pidfile=str(tmp_path / "data" / "cerhost.pids"), **kw)
     machines = [_ads(f"Bk{i}", vnc_view_password="", vnc_control_password="") for i in range(n)]
     extra = {"clock": clock} if clock is not None else {}
-    return _setup(tmp_path, machines, s, source_factory=lambda m: SimulatedSource(), **extra)
+    store, fleet, ids = _setup(tmp_path, machines, s, source_factory=lambda m: SimulatedSource(),
+                               **extra)
+    fleet._start_bridge = lambda bridge: asyncio.create_task(asyncio.sleep(0))
+    return store, fleet, ids
 
 
 def test_duas_pontes_usam_displays_diferentes(tmp_path):
@@ -665,7 +670,7 @@ def test_duas_pontes_usam_displays_diferentes(tmp_path):
             assert ha.view_password == ba.view_password and len(ha.view_password) == 8
             assert ha.control_password == ba.control_password
             await fleet.close_screen(a)
-            assert fleet.runtime(a).bridge is None and ha._closed and ba._stopped
+            assert fleet.runtime(a).bridge is None and ha.closed and ba.state == "stopped"
             await fleet.open_screen(a)
             assert fleet.runtime(a).bridge.display == 99  # o display liberado volta a ser usado
         finally:
@@ -724,7 +729,7 @@ def test_tela_ociosa_fecha_e_libera_display(tmp_path):
             now[0] += 2
             await fleet.close_idle_screens()
             rt = fleet.runtime(a)
-            assert rt.hub is None and rt.bridge is None and hub._closed and bridge._stopped
+            assert rt.hub is None and rt.bridge is None and hub.closed and bridge.state == "stopped"
             assert rt.collector is not None and not rt.collector._task.done()  # dados seguem
             await fleet.open_screen(b)
             assert fleet.runtime(b).bridge.display == 99  # display liberado
@@ -745,6 +750,136 @@ def test_br_sem_senha_vnc_abre_tela(tmp_path):
             hub = await fleet.open_screen(a)
             assert hub is not None and hub.host == "10.0.0.8" and hub.current_port() == 5900
             assert hub.view_password == "" and fleet.runtime(a).bridge is None
+        finally:
+            await fleet.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+# ---- revisão da tarefa 8 ------------------------------------------------------
+def test_frota_so_mata_wineserver_com_a_ultima_ponte(tmp_path):
+    async def run():
+        store, fleet, (a, b) = _bk_real(tmp_path, 2)
+        try:
+            await fleet.start()
+            await fleet.open_screen(a)
+            ba = fleet.runtime(a).bridge
+            assert ba.may_kill_wineserver() is True  # sozinha
+            await fleet.open_screen(b)
+            bb = fleet.runtime(b).bridge
+            assert ba.may_kill_wineserver() is False and bb.may_kill_wineserver() is False
+            await fleet.close_screen(b)
+            assert ba.may_kill_wineserver() is True
+        finally:
+            await fleet.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_limite_conta_tela_ainda_fechando(tmp_path):
+    from app.manager import ScreenLimit
+
+    async def run():
+        store, fleet, ids, bridges = _bk_fleet(tmp_path, [_ads("A"), _ads("B"), _ads("C")],
+                                               stop_delay=0.3)
+        try:
+            await fleet.start()
+            await fleet.open_screen(ids[0])
+            await fleet.open_screen(ids[1])
+            closing = asyncio.create_task(fleet.close_screen(ids[0]))
+            await asyncio.sleep(0.05)
+            assert fleet.runtime(ids[0]).bridge is None  # já saiu do runtime, mas ainda morrendo
+            with pytest.raises(ScreenLimit):
+                await fleet.open_screen(ids[2])
+            await closing
+            assert await fleet.open_screen(ids[2]) is not None
+        finally:
+            await fleet.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_ponte_sem_ferramentas_libera_a_vaga_na_hora(tmp_path):
+    from app.manager import ScreenUnavailable
+
+    async def run():
+        store, fleet, (a, b), bridges = _bk_fleet(
+            tmp_path, [_ads("A"), _ads("B")], state="missing",
+            error="Para a tela da Beckhoff falta no servidor: x11vnc.")
+        try:
+            await fleet.start()
+            with pytest.raises(ScreenUnavailable) as exc:
+                await fleet.open_screen(a)
+            assert "x11vnc" in str(exc.value)
+            rt = fleet.runtime(a)
+            assert rt.hub is None and rt.bridge is None and fleet._displays == set()
+            assert bridges[0].stopped == 1
+            assert rt.last_bridge == {"state": "missing", "error": str(exc.value)}
+            with pytest.raises(ScreenUnavailable):
+                await fleet.open_screen(b)
+            assert fleet._displays == set()
+        finally:
+            await fleet.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_sessao_que_falha_libera_a_tela_na_hora(tmp_path):
+    async def run():
+        store, fleet, (a,), bridges = _bk_fleet(tmp_path, [_ads("A")])
+        try:
+            await fleet.start()
+            hub = await fleet.open_screen(a)
+            hub.sessions["olho"] = object()
+            await fleet.screen_failed(a, hub)  # ainda tem gente: não fecha
+            assert fleet.runtime(a).hub is hub
+            del hub.sessions["olho"]
+            await fleet.screen_failed(a, hub)
+            assert fleet.runtime(a).hub is None and hub.closed and fleet._displays == set()
+            await fleet.screen_failed(a, hub)  # hub antigo: nada acontece
+        finally:
+            await fleet.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_falha_ao_criar_hub_libera_display(tmp_path):
+    async def run():
+        store, fleet, (a,), bridges = _bk_fleet(tmp_path, [_ads("A")])
+        try:
+            await fleet.start()
+
+            def boom(m, bridge):
+                raise RuntimeError("hub quebrou")
+
+            fleet._new_hub = boom
+            with pytest.raises(RuntimeError):
+                await fleet.open_screen(a)
+            assert fleet._displays == set() and fleet.runtime(a).bridge is None
+        finally:
+            await fleet.stop()
+            store.close()
+
+    asyncio.run(run())
+
+
+def test_reusar_tela_recomeca_o_prazo(tmp_path):
+    async def run():
+        now = [1000.0]
+        store, fleet, (a,) = _bk_real(tmp_path, 1, screen_idle_seconds=120, clock=lambda: now[0])
+        try:
+            await fleet.start()
+            hub = await fleet.open_screen(a)
+            now[0] += 100
+            assert await fleet.open_screen(a) is hub
+            now[0] += 30
+            await fleet.close_idle_screens()
+            assert fleet.runtime(a).hub is hub and not hub.closed
         finally:
             await fleet.stop()
             store.close()
