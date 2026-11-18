@@ -117,6 +117,9 @@ def _grant(r) -> Grant:
 
 
 class AccountStore:
+    session_idle: float = SESSION_IDLE  # segundos; o app ajusta pelo settings
+    session_max: float = SESSION_MAX
+
     def __init__(self, path: str):
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -294,7 +297,7 @@ class AccountStore:
                                    (h,)).fetchone()
         if r is None:
             return None
-        if now - r[1] > SESSION_MAX or now - r[2] > SESSION_IDLE:
+        if now - r[1] > self.session_max or now - r[2] > self.session_idle:
             with self._lock, self._conn:
                 self._conn.execute("DELETE FROM sessions WHERE token_hash=?", (h,))
             return None

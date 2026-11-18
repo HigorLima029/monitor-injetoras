@@ -1,7 +1,6 @@
 from types import SimpleNamespace
 
 import pytest
-from fastapi.testclient import TestClient
 from starlette.websockets import WebSocketDisconnect
 
 from app import main
@@ -18,15 +17,14 @@ def _settings(tmp_path):
 
 
 @pytest.fixture
-def api(tmp_path):
+def api(tmp_path, client_as):
     store = MachineStore(str(tmp_path / "m.db"))
     a = store.add(Machine(None, "A", "demo", "127.0.0.1")).id
     b = store.add(Machine(None, "B", "demo", "127.0.0.2")).id
     store.set_active(a)
     main.app.state.manager = MachineManager(store, _settings(tmp_path))
     try:
-        with TestClient(main.app) as client:
-            yield client, store, a, b
+        yield client_as("mae"), store, a, b
     finally:
         del main.app.state.manager
 
@@ -118,16 +116,16 @@ def test_ws_fecha_na_troca(api):
             ws.receive_json()
 
 
-def test_sem_maquina_ativa_503(tmp_path):
+def test_sem_maquina_ativa_503(tmp_path, client_as):
     store = MachineStore(str(tmp_path / "m.db"))
     main.app.state.manager = MachineManager(store, _settings(tmp_path))
     try:
-        with TestClient(main.app) as client:
-            r = client.get("/api/live")
-            assert r.status_code == 503
-            assert r.json()["detail"] == "Nenhuma máquina aberta. Cadastre uma em Máquinas."
-            assert client.get("/api/machines").json() == {"active_id": None, "machines": []}
-            assert client.get("/api/info").status_code == 503
+        client = client_as("mae")
+        r = client.get("/api/live")
+        assert r.status_code == 503
+        assert r.json()["detail"] == "Nenhuma máquina aberta. Cadastre uma em Máquinas."
+        assert client.get("/api/machines").json() == {"active_id": None, "machines": []}
+        assert client.get("/api/info").status_code == 503
     finally:
         del main.app.state.manager
 
@@ -194,7 +192,7 @@ def test_put_na_ativa_sem_mudar_conexao_nao_reativa(api):
         assert msg["machine_id"] == a
 
 
-def test_beckhoff_mostra_8_zonas_sem_bico(tmp_path):
+def test_beckhoff_mostra_8_zonas_sem_bico(tmp_path, client_as):
     from app.sources import SimulatedSource
     store = MachineStore(str(tmp_path / "m.db"))
     m = store.add(Machine(None, "Beckhoff", "ads", "127.0.0.1", ams_net_id="5.79.97.240.1.1")).id
@@ -203,8 +201,8 @@ def test_beckhoff_mostra_8_zonas_sem_bico(tmp_path):
     main.app.state.manager = MachineManager(store, _settings(tmp_path),
                                             source_factory=lambda _m: SimulatedSource())
     try:
-        with TestClient(main.app) as client:
-            zones = client.get("/api/info").json()["zones"]
+        client = client_as("mae")
+        zones = client.get("/api/info").json()["zones"]
     finally:
         del main.app.state.manager
     assert [z["label"] for z in zones] == [f"Zona {i}" for i in range(1, 9)]
@@ -237,33 +235,33 @@ def _bk_api(tmp_path, bridge_factory, **machine):
     return store
 
 
-def test_status_mostra_falta_de_ferramenta(tmp_path):
+def test_status_mostra_falta_de_ferramenta(tmp_path, client_as):
     _bk_api(tmp_path, _MissingBridge, vnc_enabled=True, vnc_view_password="SEGREDO1",
             vnc_control_password="SEGREDO2")
     try:
-        with TestClient(main.app) as client:
-            info = client.get("/api/info").json()
-            assert info["vnc"] is True and info["vnc_control"] is True
-            r = client.get("/api/vnc/status")
-            assert r.status_code == 200
-            st = r.json()
-            assert st["bridge"]["state"] == "missing"
-            assert "x11vnc" in st["bridge"]["error"] and "CERHOST.exe" in st["bridge"]["error"]
-            assert "SEGREDO" not in r.text
-            with client.websocket_connect("/ws/vnc") as ws:
-                with pytest.raises(WebSocketDisconnect) as exc:
-                    ws.receive_bytes()
-            assert exc.value.code == 1008 and "falta no servidor" in exc.value.reason
+        client = client_as("mae")
+        info = client.get("/api/info").json()
+        assert info["vnc"] is True and info["vnc_control"] is True
+        r = client.get("/api/vnc/status")
+        assert r.status_code == 200
+        st = r.json()
+        assert st["bridge"]["state"] == "missing"
+        assert "x11vnc" in st["bridge"]["error"] and "CERHOST.exe" in st["bridge"]["error"]
+        assert "SEGREDO" not in r.text
+        with client.websocket_connect("/ws/vnc") as ws:
+            with pytest.raises(WebSocketDisconnect) as exc:
+                ws.receive_bytes()
+        assert exc.value.code == 1008 and "falta no servidor" in exc.value.reason
     finally:
         del main.app.state.manager
 
 
-def test_ads_sem_tela_nao_tem_vnc(tmp_path):
+def test_ads_sem_tela_nao_tem_vnc(tmp_path, client_as):
     _bk_api(tmp_path, _MissingBridge)
     try:
-        with TestClient(main.app) as client:
-            assert client.get("/api/info").json()["vnc"] is False
-            assert client.get("/api/vnc/status").status_code == 404
+        client = client_as("mae")
+        assert client.get("/api/info").json()["vnc"] is False
+        assert client.get("/api/vnc/status").status_code == 404
     finally:
         del main.app.state.manager
 

@@ -81,6 +81,10 @@ class Settings:
                                if os.getenv("CERHOST_WINEPREFIX", "").strip() else "")
     # pids dos processos da ponte: a proxima subida encerra as sobras de um Monitor que caiu feio
     cerhost_pidfile: str = _path(os.getenv("CERHOST_PIDFILE", "data/cerhost.pids"))
+    # Login: cookie de sessão só por HTTPS (desligar só em teste local sem HTTPS)
+    cookie_secure: bool = _bool("COOKIE_SECURE", True)
+    session_idle_hours: float = float(os.getenv("SESSION_IDLE_HOURS", "8"))
+    session_max_hours: float = float(os.getenv("SESSION_MAX_HOURS", "24"))
 
 
 settings = Settings()

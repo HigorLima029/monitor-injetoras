@@ -215,9 +215,7 @@ def test_painel_liberado_quando_ninguem_assiste(panel):
     asyncio.run(run())
 
 
-def test_ws_e_api_de_controle(tmp_path, monkeypatch, panel):
-    from fastapi.testclient import TestClient
-
+def test_ws_e_api_de_controle(tmp_path, monkeypatch, panel, client_as):
     from types import SimpleNamespace
 
     from app import main
@@ -245,22 +243,22 @@ def test_ws_e_api_de_controle(tmp_path, monkeypatch, panel):
         ws.send_bytes(b"\x01")
         assert ws.receive_bytes()[:4] == struct.pack(">HH", 8, 6)
 
-    with TestClient(main.app) as client:
-        assert client.get("/api/info").json()["vnc_control"] is True
-        with client.websocket_connect("/ws/vnc?sid=olho1", subprotocols=["binary"]) as ws:
-            rfb(ws, VIEW)
-            st = client.get("/api/vnc/status", params={"sid": "olho1"}).json()
-            assert st["role"] == "view" and st["controller"] is None and "events" not in st
-            r = client.post("/api/vnc/control", json={"sid": "olho1", "action": "take"})
-            assert r.status_code == 403
-        with client.websocket_connect("/ws/vnc?sid=op1", subprotocols=["binary"]) as ws:
-            rfb(ws, CONTROL)
-            r = client.post("/api/vnc/control", json={"sid": "op1", "action": "take"})
-            assert r.status_code == 200 and r.json()["ok"]
-            st = client.get("/api/vnc/status", params={"sid": "op1"}).json()
-            assert st["controller"]["me"] is True and st["role"] == "control"
-            assert client.post("/api/vnc/control", json={"sid": "op1", "action": "release"}).json()["ok"]
-            assert client.get("/api/vnc/status", params={"sid": "op1"}).json()["controller"] is None
+    client = client_as("mae")
+    assert client.get("/api/info").json()["vnc_control"] is True
+    with client.websocket_connect("/ws/vnc?sid=olho1", subprotocols=["binary"]) as ws:
+        rfb(ws, VIEW)
+        st = client.get("/api/vnc/status", params={"sid": "olho1"}).json()
+        assert st["role"] == "view" and st["controller"] is None and "events" not in st
+        r = client.post("/api/vnc/control", json={"sid": "olho1", "action": "take"})
+        assert r.status_code == 403
+    with client.websocket_connect("/ws/vnc?sid=op1", subprotocols=["binary"]) as ws:
+        rfb(ws, CONTROL)
+        r = client.post("/api/vnc/control", json={"sid": "op1", "action": "take"})
+        assert r.status_code == 200 and r.json()["ok"]
+        st = client.get("/api/vnc/status", params={"sid": "op1"}).json()
+        assert st["controller"]["me"] is True and st["role"] == "control"
+        assert client.post("/api/vnc/control", json={"sid": "op1", "action": "release"}).json()["ok"]
+        assert client.get("/api/vnc/status", params={"sid": "op1"}).json()["controller"] is None
 
 
 def test_porta_tcp_sem_auto_assumir(panel):
@@ -318,10 +316,9 @@ def test_fechar_hub_manda_o_motivo():
     asyncio.run(run())
 
 
-def test_troca_de_maquina_avisa_o_navegador(tmp_path, monkeypatch, panel):
+def test_troca_de_maquina_avisa_o_navegador(tmp_path, monkeypatch, panel, client_as):
     from types import SimpleNamespace
 
-    from fastapi.testclient import TestClient
     from starlette.websockets import WebSocketDisconnect
 
     from app import main
@@ -339,19 +336,19 @@ def test_troca_de_maquina_avisa_o_navegador(tmp_path, monkeypatch, panel):
     store.set_active(a)
     monkeypatch.setattr(main.app.state, "manager", MachineManager(
         store, cfg, source_factory=lambda m: SimulatedSource(seed=2)), raising=False)
-    with TestClient(main.app) as client:
-        with client.websocket_connect("/ws/vnc?sid=olho", subprotocols=["binary"]) as ws:
-            assert ws.receive_bytes() == b"RFB 003.008\n"
-            ws.send_bytes(b"RFB 003.008\n")
-            assert ws.receive_bytes() == b"\x01\x02"
-            ws.send_bytes(b"\x02")
-            ws.send_bytes(vnc_response(VIEW, ws.receive_bytes()))
-            assert ws.receive_bytes() == b"\x00\x00\x00\x00"
-            assert client.post(f"/api/machines/{b}/activate").status_code == 200
-            with pytest.raises(WebSocketDisconnect) as exc:
-                for _ in range(20):
-                    ws.receive_bytes()
-            assert exc.value.reason == "máquina trocada"
+    client = client_as("mae")
+    with client.websocket_connect("/ws/vnc?sid=olho", subprotocols=["binary"]) as ws:
+        assert ws.receive_bytes() == b"RFB 003.008\n"
+        ws.send_bytes(b"RFB 003.008\n")
+        assert ws.receive_bytes() == b"\x01\x02"
+        ws.send_bytes(b"\x02")
+        ws.send_bytes(vnc_response(VIEW, ws.receive_bytes()))
+        assert ws.receive_bytes() == b"\x00\x00\x00\x00"
+        assert client.post(f"/api/machines/{b}/activate").status_code == 200
+        with pytest.raises(WebSocketDisconnect) as exc:
+            for _ in range(20):
+                ws.receive_bytes()
+        assert exc.value.reason == "máquina trocada"
 
 
 def test_porta_do_painel_segue_o_provedor():

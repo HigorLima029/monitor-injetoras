@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from . import auth
 from .accounts import AccountStore, migrate_machine_clients
 from .collector import Collector, to_number
 from .config import settings
@@ -45,17 +46,33 @@ def _client_name(mgr: MachineManager, client_id: int | None) -> str:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    manager = getattr(app.state, "manager", None) or build_manager()
+    injected = getattr(app.state, "manager", None)
+    manager = injected or build_manager()
     app.state.manager = manager
+    accounts = getattr(app.state, "accounts", None) or manager.accounts
+    if accounts is None:
+        raise RuntimeError("Sem banco de contas: o login não tem como funcionar.")
+    manager.accounts = accounts
+    accounts.session_idle = settings.session_idle_hours * 3600
+    accounts.session_max = settings.session_max_hours * 3600
+    app.state.accounts = accounts
+    app.state.auth = auth.AuthState()
     await manager.start()
-    yield
-    await manager.stop()
-    manager.store.close()
-    if manager.accounts is not None:
-        manager.accounts.close()
+    sweeper = asyncio.create_task(auth.sweeper(accounts))
+    try:
+        yield
+    finally:
+        sweeper.cancel()
+        await asyncio.gather(sweeper, return_exceptions=True)
+        await manager.stop()
+        if injected is None:  # quem injetou (testes) fecha o que é seu
+            manager.store.close()
+            accounts.close()
 
 
 app = FastAPI(title="Monitor de Injetoras", lifespan=lifespan)
+app.add_middleware(auth.AuthMiddleware)
+app.include_router(auth.router)
 
 
 def _mgr(app_: FastAPI) -> MachineManager:
@@ -313,6 +330,17 @@ def tags(q: str = "", limit: int = Query(2000, ge=1, le=5000)):
 
 @app.websocket("/ws")
 async def ws(socket: WebSocket):
+    if await auth.ws_user(socket) is None:
+        return
+    token = socket.state.session_token
+    auth.track(token, socket)
+    try:
+        await _ws_live(socket)
+    finally:
+        auth.untrack(token, socket)
+
+
+async def _ws_live(socket: WebSocket):
     await socket.accept()
     c = _mgr(app).collector
     if c is None:
@@ -336,6 +364,17 @@ async def ws(socket: WebSocket):
 @app.websocket("/ws/vnc")
 async def ws_vnc(socket: WebSocket, sid: str = Query("", max_length=64)):
     """Tela ao vivo pelo hub VNC: a senha digitada define se a pessoa so assiste ou pode operar."""
+    if await auth.ws_user(socket) is None:
+        return
+    token = socket.state.session_token
+    auth.track(token, socket)
+    try:
+        await _ws_vnc(socket, sid)
+    finally:
+        auth.untrack(token, socket)
+
+
+async def _ws_vnc(socket: WebSocket, sid: str):
     offered = socket.headers.get("sec-websocket-protocol", "")
     await socket.accept(subprotocol="binary" if "binary" in offered else None)
     mgr = _mgr(app)

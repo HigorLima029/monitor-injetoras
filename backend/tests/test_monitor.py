@@ -65,9 +65,7 @@ def test_incrementos_por_hora():
     assert sum(v for _, v in per) == 16
 
 
-def test_api_com_simulador(tmp_path, monkeypatch):
-    from fastapi.testclient import TestClient
-
+def test_api_com_simulador(tmp_path, monkeypatch, client_as):
     from app import main
 
     from types import SimpleNamespace
@@ -83,25 +81,25 @@ def test_api_com_simulador(tmp_path, monkeypatch):
     store.set_active(store.add(Machine(None, "Demo", "demo", "127.0.0.1")).id)
     monkeypatch.setattr(main.app.state, "manager", MachineManager(
         store, cfg, source_factory=lambda m: SimulatedSource(cycle_seconds=0.05, seed=1)), raising=False)
-    with TestClient(main.app) as client:
-        col = main.app.state.manager.collector
-        time.sleep(0.6)
-        live = client.get("/api/live").json()
-        assert live["status"]["connected"] is True
-        assert "TempZ1Now" in live["values"]
-        hist = client.get("/api/history", params={"tags": "ProductionCount", "minutes": 5}).json()
-        assert hist["series"]["ProductionCount"]
-        prod = client.get("/api/production", params={"hours": 1}).json()
-        assert prod["produced"] > 0
-        assert client.get("/api/alarms").json()["monitored"] > 50
-        tags = client.get("/api/tags", params={"q": "temp"}).json()
-        assert all("temp" in r["tag"].lower() for r in tags["rows"])
-        vals = client.get("/api/values", params={"tags": "Clamp1Pres,Open4Pos,Hold2Time,Nada"}).json()
-        assert vals["values"]["Clamp1Pres"] == 40.0 and vals["values"]["Open4Pos"] == 360.0
-        assert vals["values"]["Nada"] is None
-        assert "Hold2Time" in col.fast_tags
-        with client.websocket_connect("/ws") as ws:
-            assert "status" in ws.receive_json()
+    client = client_as("mae")
+    col = main.app.state.manager.collector
+    time.sleep(0.6)
+    live = client.get("/api/live").json()
+    assert live["status"]["connected"] is True
+    assert "TempZ1Now" in live["values"]
+    hist = client.get("/api/history", params={"tags": "ProductionCount", "minutes": 5}).json()
+    assert hist["series"]["ProductionCount"]
+    prod = client.get("/api/production", params={"hours": 1}).json()
+    assert prod["produced"] > 0
+    assert client.get("/api/alarms").json()["monitored"] > 50
+    tags = client.get("/api/tags", params={"q": "temp"}).json()
+    assert all("temp" in r["tag"].lower() for r in tags["rows"])
+    vals = client.get("/api/values", params={"tags": "Clamp1Pres,Open4Pos,Hold2Time,Nada"}).json()
+    assert vals["values"]["Clamp1Pres"] == 40.0 and vals["values"]["Open4Pos"] == 360.0
+    assert vals["values"]["Nada"] is None
+    assert "Hold2Time" in col.fast_tags
+    with client.websocket_connect("/ws") as ws:
+        assert "status" in ws.receive_json()
 
 
 def test_le_painel_br_euromap63():
