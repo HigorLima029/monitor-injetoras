@@ -159,10 +159,29 @@ da máquina e só o servidor as usa; o acesso é decidido pelo login + perfil + 
   cliente. Máquina **em preparação** (sem cliente): conta mãe e técnico controlam só com a
   confirmação de senha (é a bancada).
 
-### Autorização de suporte
-- Botão no cliente: "Autorizar suporte por 30 min" (por máquina), "Encerrar suporte".
+### Autorização de suporte (decidido pelo Higor)
+- **Caminho normal:** qualquer usuário ativo do cliente clica "Autorizar suporte por 30 min" (por
+  máquina) e pode "Encerrar suporte" — inclusive uma autorização dada por um colega.
+- **Último caso, pela conta mãe:** a conta mãe pode registrar a autorização **em nome do cliente**,
+  com **motivo obrigatório** (ex.: "cliente pediu por telefone, falei com Maria às 14:02"). Fica
+  **destacada** na auditoria e **aparece para os usuários do cliente** na tela da máquina
+  ("Suporte autorizado pela Chen Hsong em seu nome — motivo: ...") e na lista de autorizações.
+  Técnico não tem essa opção.
 - Enquanto ativa, aparece para o cliente e para os técnicos ("Suporte autorizado até 14:35 por
-  Maria"). Registrada na auditoria.
+  Maria"). Toda autorização (normal ou em nome do cliente) fica registrada para nos proteger.
+- Futuro (passo da IA): o cliente pede suporte pelo próprio sistema (primeiro a IA, depois um
+  técnico); a autorização fica ligada a esse pedido. Nesta fase existe só o botão.
+
+### Senhas VNC dos painéis B&R
+- O hub já funciona com painel **sem senha** VNC (verificado no código: aceita segurança "None").
+- Máquinas novas: senha VNC configurada **na fábrica**, **única por máquina** (não uma senha comum
+  a todas), guardada só no cadastro do Monitor. O cliente não recebe a senha — se soubesse, poderia
+  controlar o painel com qualquer programa VNC, sem passar pelas regras do Monitor.
+- Máquinas já em clientes sem senha: o Monitor mostra para a conta mãe/técnicos um aviso
+  **"painel sem senha VNC"** na máquina. A senha é colocada na visita de instalação do RUT (que já
+  é presencial), com o cliente ciente. Até lá, a proteção é a rede: o painel fica só na rede do RUT.
+- Fora do código, entra no **roteiro de instalação**: firewall do RUT liberando o ZeroTier só do
+  servidor do Monitor para as portas necessárias do painel (5900/987/48898/4840).
 
 ### Registro (auditoria)
 - Tabela única de eventos: quando, quem (usuário + perfil + cliente), o quê, máquina, IP de
@@ -229,5 +248,7 @@ da máquina e só o servidor as usa; o acesso é decidido pelo login + perfil + 
 8. **Telas da Beckhoff ao mesmo tempo:** limite configurável (padrão 2). Ao atingir, a nova é
    recusada com mensagem clara ("limite de telas da Beckhoff abertas"), sem derrubar ninguém.
    Coletor ADS e CERHost na mesma máquina já convivem (bancada).
+10. Ordem de recomendação para as senhas VNC: fábrica > visita de instalação; nunca pedir ao cliente
+   para configurar.
 9. **Confirmação de senha vale para uma tomada de controle**: se o controle volta a visualização
    (inatividade, fim da autorização ou liberação), assumir de novo pede confirmação de novo.
