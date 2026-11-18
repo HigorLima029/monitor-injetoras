@@ -179,7 +179,7 @@ class AccountStore:
             raise ValueError("Só usuário cliente pode ter cliente.")
 
     def add_user(self, username: str, name: str, role: str, password: str,
-                 client_id: int | None = None) -> User:
+                 client_id: int | None = None, totp_secret: str | None = None) -> User:
         username = (username or "").strip().lower()
         if not username:
             raise ValueError("Informe o login.")
@@ -192,8 +192,10 @@ class AccountStore:
         try:
             with self._lock, self._conn:
                 cur = self._conn.execute(
-                    "INSERT INTO users(username, name, role, client_id, pw_hash) VALUES (?,?,?,?,?)",
-                    (username, (name or username).strip(), role, client_id, hash_password(password)))
+                    "INSERT INTO users(username, name, role, client_id, pw_hash, totp_secret)"
+                    " VALUES (?,?,?,?,?,?)",
+                    (username, (name or username).strip(), role, client_id,
+                     hash_password(password), totp_secret or None))
                 new_id = cur.lastrowid
         except sqlite3.IntegrityError:
             raise ValueError("Esse login já existe.") from None

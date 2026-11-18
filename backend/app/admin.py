@@ -61,46 +61,62 @@ def main(argv: list[str], *, getpass=_getpass.getpass, out=sys.stdout,
     own = store is None
     store = store or AccountStore(settings.config_db_path)
     try:
-        if args.cmd == "criar-mae":
-            if any(u.role == "mae" for u in store.list_users()):
-                print("Já existe uma conta mãe. Use resetar-senha ou resetar-2fa.", file=out)
-                return 1
-            if store.get_by_username(args.usuario):
-                print("Esse login já existe.", file=out)
-                return 1
-            pw = _ask_password(getpass, "mae", out)
-            if pw is None:
-                return 1
-            secret = _confirm_totp(args.usuario, ask, out)
-            if secret is None:
-                return 1
-            user = store.add_user(args.usuario, args.nome, "mae", pw)
-            store.set_totp(user.id, secret)
-            print(f"Conta mãe '{user.username}' criada.", file=out)
-            return 0
-
-        user = store.get_by_username(args.usuario)
-        if user is None:
-            print(f"Usuário '{args.usuario}' não encontrado.", file=out)
-            return 1
-        if args.cmd == "resetar-senha":
-            pw = _ask_password(getpass, user.role, out)
-            if pw is None:
-                return 1
-            store.set_password(user.id, pw)
-            store.delete_user_sessions(user.id)
-            print("Senha alterada; as sessões abertas foram encerradas.", file=out)
-            return 0
-        secret = _confirm_totp(user.username, ask, out)  # resetar-2fa
-        if secret is None:
-            return 1
-        store.set_totp(user.id, secret)
-        store.delete_user_sessions(user.id)
-        print("Autenticador atualizado; as sessões abertas foram encerradas.", file=out)
-        return 0
+        return _run(args, store, getpass, out, ask)
+    except ValueError as e:
+        print(str(e), file=out)
+        return 1
+    except (KeyboardInterrupt, EOFError):
+        print("\nCancelado.", file=out)
+        return 1
     finally:
         if own:
             store.close()
+
+
+def _run(args, store: AccountStore, getpass, out, ask) -> int:
+    if args.cmd == "criar-mae":
+        login = args.usuario.strip().lower()
+        if not login:
+            print("Informe o login.", file=out)
+            return 1
+        if not args.nome.strip():
+            print("Informe o nome.", file=out)
+            return 1
+        if any(u.role == "mae" for u in store.list_users()):
+            print("Já existe uma conta mãe. Use resetar-senha ou resetar-2fa.", file=out)
+            return 1
+        if store.get_by_username(login):
+            print("Esse login já existe.", file=out)
+            return 1
+        pw = _ask_password(getpass, "mae", out)
+        if pw is None:
+            return 1
+        secret = _confirm_totp(login, ask, out)
+        if secret is None:
+            return 1
+        user = store.add_user(login, args.nome, "mae", pw, totp_secret=secret)  # atômico
+        print(f"Conta mãe '{user.username}' criada.", file=out)
+        return 0
+
+    user = store.get_by_username(args.usuario)
+    if user is None:
+        print(f"Usuário '{args.usuario}' não encontrado.", file=out)
+        return 1
+    if args.cmd == "resetar-senha":
+        pw = _ask_password(getpass, user.role, out)
+        if pw is None:
+            return 1
+        store.set_password(user.id, pw)
+        store.delete_user_sessions(user.id)
+        print("Senha alterada; as sessões abertas foram encerradas.", file=out)
+        return 0
+    secret = _confirm_totp(user.username, ask, out)  # resetar-2fa
+    if secret is None:
+        return 1
+    store.set_totp(user.id, secret)
+    store.delete_user_sessions(user.id)
+    print("Autenticador atualizado; as sessões abertas foram encerradas.", file=out)
+    return 0
 
 
 if __name__ == "__main__":

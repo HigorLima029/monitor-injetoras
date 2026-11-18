@@ -106,3 +106,75 @@ def test_resetar_2fa():
     assert rc == 1 and store.totp_secret(u.id) == novo
     rc, out = run(["resetar-2fa", "--usuario", "x"], store)
     assert rc == 1 and "não encontrado" in out.lower()
+
+
+def _ask_ok(buf):
+    return lambda p="": totp_code(secret_from(buf.getvalue()), time.time())
+
+
+def test_criar_mae_atomica_se_gravacao_falha(monkeypatch):
+    store = AccountStore(":memory:")
+
+    def boom(*a, **k):
+        raise RuntimeError("falha")
+
+    monkeypatch.setattr(store, "set_totp", boom)  # não pode ser usado em criar-mae
+    buf = io.StringIO()
+    rc = admin.main(["criar-mae", "--usuario", "higor", "--nome", "H"],
+                    getpass=fake_getpass(SENHA, SENHA), out=buf, store=store, ask=_ask_ok(buf))
+    assert rc == 0
+    u = store.get_by_username("higor")
+    assert u.has_totp  # usuário e 2FA gravados juntos
+
+    store2 = AccountStore(":memory:")
+    # falha no add_user: nada fica gravado e a mensagem é impressa
+    monkeypatch.setattr(store2, "add_user", lambda *a, **k: (_ for _ in ()).throw(ValueError("Erro x.")))
+    buf = io.StringIO()
+    rc = admin.main(["criar-mae", "--usuario", "h", "--nome", "H"],
+                    getpass=fake_getpass(SENHA, SENHA), out=buf, store=store2, ask=_ask_ok(buf))
+    assert rc == 1 and "Erro x." in buf.getvalue() and store2.list_users() == []
+
+
+def test_add_user_com_totp_e_atomico():
+    store = AccountStore(":memory:")
+    u = store.add_user("m", "M", "mae", SENHA, totp_secret="ABC")
+    assert store.totp_secret(u.id) == "ABC"
+    try:
+        store.add_user("m", "M", "mae", SENHA, totp_secret="XYZ")
+    except ValueError:
+        pass
+    assert store.totp_secret(u.id) == "ABC" and len(store.list_users()) == 1
+
+
+def test_nome_vazio_e_login_normalizado():
+    store = AccountStore(":memory:")
+    rc, out = run(["criar-mae", "--usuario", "x", "--nome", "  "], store, senhas=(SENHA, SENHA))
+    assert rc == 1 and "nome" in out.lower() and store.list_users() == []
+    store.add_user("higor", "H", "tecnico", "senha-123456")
+    rc, out = run(["criar-mae", "--usuario", " Higor ", "--nome", "H"], store, senhas=(SENHA, SENHA))
+    assert rc == 1 and "já existe" in out.lower()
+    # label do otpauth em minúsculas
+    buf = io.StringIO()
+    admin.main(["criar-mae", "--usuario", "MAE1", "--nome", "M"], getpass=fake_getpass(SENHA, SENHA),
+               out=buf, store=store, ask=_ask_ok(buf))
+    assert "mae1" in buf.getvalue() and "MAE1" not in buf.getvalue()
+    assert store.get_by_username("mae1").role == "mae"
+
+
+def test_cancelar_nao_grava():
+    store = AccountStore(":memory:")
+
+    def interrompe(p=""):
+        raise KeyboardInterrupt
+
+    out = io.StringIO()
+    rc = admin.main(["criar-mae", "--usuario", "h", "--nome", "H"], getpass=fake_getpass(SENHA, SENHA),
+                    out=out, store=store, ask=interrompe)
+    assert rc == 1 and "Cancelado." in out.getvalue() and store.list_users() == []
+
+    def eof(*a):
+        raise EOFError
+
+    out = io.StringIO()
+    rc = admin.main(["criar-mae", "--usuario", "h", "--nome", "H"], getpass=eof, out=out, store=store)
+    assert rc == 1 and "Cancelado." in out.getvalue() and store.list_users() == []
