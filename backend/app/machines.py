@@ -11,9 +11,9 @@ from urllib.parse import urlparse
 
 log = logging.getLogger(__name__)
 
-KINDS = ("chy", "em63", "ads", "demo")
-_PROFILE = {"chy": "chy", "em63": "em63", "ads": "ads", "demo": "chy"}
-_NAMESPACE = {"chy": 1, "em63": 6, "ads": 1, "demo": 1}
+KINDS = ("chy", "em63", "ads", "inovance", "demo")
+_PROFILE = {"chy": "chy", "em63": "em63", "ads": "ads", "inovance": "inovance", "demo": "chy"}
+_NAMESPACE = {"chy": 1, "em63": 6, "ads": 1, "inovance": 1, "demo": 1}
 _SECRETS = ("vnc_view_password", "vnc_control_password")
 _NULLABLE = ("namespace", "vnc_enabled")  # None = padrão do tipo
 # Campos que mudam a conexão com a máquina: só eles exigem reabrir a máquina aberta.
@@ -244,7 +244,7 @@ def _seed_machine(store: MachineStore, settings) -> Machine:
     if settings.simulate:
         kind = "demo"
     else:
-        kind = settings.profile if settings.profile in ("chy", "em63", "ads") else "chy"
+        kind = settings.profile if settings.profile in ("chy", "em63", "ads", "inovance") else "chy"
     ns = settings.namespace if settings.namespace != 1 else None
     notes = ""
     vnc_host = (getattr(settings, "vnc_host", "") or "").strip()

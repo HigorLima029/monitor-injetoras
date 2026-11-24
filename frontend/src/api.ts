@@ -26,7 +26,7 @@ export interface Zone {
   max: string
 }
 
-export type MachineKind = 'chy' | 'em63' | 'ads' | 'demo'
+export type MachineKind = 'chy' | 'em63' | 'ads' | 'inovance' | 'demo'
 
 export interface MachineStatus {
   online: boolean | null
@@ -50,7 +50,7 @@ export interface Machine {
   notes: string
   has_view_password: boolean
   has_control_password: boolean
-  profile: 'chy' | 'em63' | 'ads'
+  profile: 'chy' | 'em63' | 'ads' | 'inovance'
   opcua_url: string
   status?: MachineStatus
 }
@@ -79,7 +79,7 @@ export interface Info {
   machine_name: string
   opcua_url: string
   simulate: boolean
-  profile?: 'chy' | 'em63' | 'ads'
+  profile?: 'chy' | 'em63' | 'ads' | 'inovance'
   vnc?: boolean
   vnc_control?: boolean
   poll_seconds: number

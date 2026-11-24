@@ -11,6 +11,7 @@ from pathlib import Path
 from .cerhost import CerhostBridge
 from .collector import Collector
 from .em63 import Em63Source
+from .inovance import InovanceSource
 from .machines import Machine, MachineStore
 from .sources import OpcUaSource, SimulatedSource
 from .storage import Storage
@@ -68,6 +69,8 @@ class MachineManager:
             return SimulatedSource()
         if m.kind == "em63":
             return Em63Source(m.opcua_url, m.effective_namespace)
+        if m.kind == "inovance":
+            return InovanceSource(m.opcua_url, m.effective_namespace)
         if m.kind == "ads":
             from .ads_source import AdsSource
             return AdsSource(m.ams_net_id, m.host, m.ads_port, self.settings.ads_local_net_id)
