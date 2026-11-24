@@ -131,7 +131,8 @@ export default function App() {
     }
   }
   const brandSub = info?.profile === 'em63' ? 'OPC-UA · painel B&R'
-    : info?.profile === 'ads' ? 'ADS · painel Beckhoff' : 'OPC-UA · gateway Mega'
+    : info?.profile === 'ads' ? 'ADS · painel Beckhoff'
+    : info?.profile === 'inovance' ? 'OPC-UA · painel Inovance' : 'OPC-UA · gateway Mega'
   // 503 = nenhuma máquina aberta (ainda não sabemos pelo /api/machines): não é servidor fora do ar.
   const mgrDown = infoError && !noMachine && !infoError.includes(' 503 ')
 

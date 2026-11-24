@@ -7,8 +7,12 @@ const KIND_LABEL: Record<MachineKind, string> = {
   chy: 'CHY · CHL3200',
   em63: 'B&R · Euromap 63',
   ads: 'Beckhoff · ADS',
+  inovance: 'Inovance · IT7000',
   demo: 'Simulada',
 }
+
+/** Tipos que falam OPC-UA direto (IP + porta + namespace), com Tela ao vivo por VNC. */
+const isOpc = (k: MachineKind) => k === 'chy' || k === 'em63' || k === 'inovance'
 
 interface Draft {
   client: string
@@ -54,7 +58,7 @@ const isPort = (v: string) => /^\d+$/.test(v) && +v >= 1 && +v <= 65535
  */
 function retargets(d: Draft, orig: Draft | null): boolean {
   if (!orig) return false
-  const opc = d.kind === 'chy' || d.kind === 'em63'
+  const opc = isOpc(d.kind)
   return orig.host.trim() !== d.host.trim() || (opc && (+d.vnc_port || 5900) !== +orig.vnc_port)
 }
 
@@ -63,7 +67,7 @@ function validate(d: Draft): Partial<Record<keyof Draft, string>> {
   if (!d.name.trim()) e.name = 'Dê um nome para a máquina.'
   if (!d.client.trim()) e.client = 'Informe o cliente.'
   if (!d.host.trim()) e.host = 'Informe o IP ou o nome da máquina na rede.'
-  const opc = d.kind === 'chy' || d.kind === 'em63'
+  const opc = isOpc(d.kind)
   if (opc && !isPort(d.opcua_port)) e.opcua_port = 'Use um número de 1 a 65535.'
   if (opc && d.namespace.trim() && !/^\d+$/.test(d.namespace.trim())) e.namespace = 'Use um número inteiro.'
   if (d.kind === 'ads' && !d.ams_net_id.trim()) e.ams_net_id = 'Informe o AMS Net ID (ex.: 192.168.0.10.1.1).'
@@ -86,7 +90,7 @@ function toInput(d: Draft, orig: Draft | null): MachineInput {
   const body: MachineInput = {}
   const base = (['client', 'name', 'kind', 'host', 'notes'] as const)
   for (const k of base) if (!orig || orig[k] !== d[k]) body[k] = d[k].trim() as never
-  if (d.kind === 'chy' || d.kind === 'em63') {
+  if (isOpc(d.kind)) {
     if (changed('opcua_port')) body.opcua_port = +d.opcua_port
     if (changed('namespace')) body.namespace = d.namespace.trim() ? +d.namespace : null
     if (changed('vnc_enabled')) body.vnc_enabled = d.vnc_enabled
@@ -269,7 +273,7 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
   const set = <K extends keyof Draft>(k: K, v: Draft[K]) => setD((x) => ({ ...x, [k]: v }))
   const err = (k: keyof Draft) => (submitted || touched[k] ? errors[k] : undefined)
   const blur = (k: keyof Draft) => () => setTouched((t) => ({ ...t, [k]: true }))
-  const opc = d.kind === 'chy' || d.kind === 'em63'
+  const opc = isOpc(d.kind)
   const hadPassword = !!machine && (machine.has_view_password || machine.has_control_password)
   const retarget = retargets(d, orig) && hadPassword
   const keepHint = (has: boolean | undefined) => (has && !retarget ? 'deixe em branco para manter' : '')

@@ -145,6 +145,49 @@ def test_le_painel_br_euromap63():
 
 
 
+def test_le_painel_inovance():
+    from app.inovance import InovanceSource
+    from tests import fake_inovance
+
+    async def run():
+        server, nodes = await fake_inovance.start(4853)
+        try:
+            src = InovanceSource("opc.tcp://127.0.0.1:4853", 1)
+            await src.connect()
+            tags = await src.list_tags()
+            assert "ProductionCount" in tags and "INO.Temp7 Real" in tags
+            vals = await src.read(["ProductionCount", "ProductionGoodCount", "CycleMonitor",
+                                   "ProductionCycle", "TempNozzleNow", "TempZ1Now", "TempZ5Now",
+                                   "TempNozzle", "InjectLastTime", "PlastLastTime", "OperatorMode",
+                                   "DeviceOnOff", "ProductionStatus", "WarnMachineError",
+                                   "INO.Temp7 Real"])
+            assert vals["ProductionCount"] == 12345.0 and vals["ProductionGoodCount"] == 12345.0
+            assert vals["CycleMonitor"] == 28.5 and vals["ProductionCycle"] == 28.5
+            assert vals["TempNozzleNow"] == 210.0 and vals["TempZ1Now"] == 200.0
+            assert vals["TempZ5Now"] == 160.0 and vals["TempNozzle"] == 215.0
+            assert vals["InjectLastTime"] == 1.5 and vals["PlastLastTime"] == 6.0
+            assert vals["OperatorMode"] == 3.0 and vals["DeviceOnOff"] == 1.0
+            assert vals["ProductionStatus"] == 1.0 and vals["WarnMachineError"] == 0.0
+            assert vals["INO.Temp7 Real"] == 50.0  # leitura crua passa direto
+
+            col = Collector(src, Storage(":memory:"), poll_seconds=0.1, full_poll_seconds=999)
+            col.tags = tags
+            await col.poll_once()
+            assert col.machine_state() == "parada"
+            await nodes["Alarm1"].write_value(1.0)  # só o servidor de teste muda
+            await col.poll_once()
+            assert col.active_alarms == {"WarnMachineError"} and col.machine_state() == "alarme"
+            await nodes["Alarm1"].write_value(0.0)
+            await nodes["OpenCnt Low Real"].write_value(2346.0)  # ciclou: +1 peça
+            await col.poll_once()
+            assert col.machine_state() == "produzindo"
+            await src.close()
+        finally:
+            await server.stop()
+
+    asyncio.run(run())
+
+
 def test_fases_em_milissegundos_viram_segundos():
     from app.em63 import translate
 

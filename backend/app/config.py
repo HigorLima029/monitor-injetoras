@@ -49,6 +49,7 @@ class Settings:
     retention_days: int = int(os.getenv("RETENTION_DAYS", "7"))
     namespace: int = int(os.getenv("OPCUA_NAMESPACE", "1"))
     # "chy" = gateway Mega CHL3200 (variaveis ns=1;s=Nome) | "em63" = painel B&R Euromap 63
+    # "ads" = Beckhoff (ADS) | "inovance" = painel Inovance IT7000 (OPC-UA, nos numericos por nome)
     profile: str = os.getenv("MACHINE_PROFILE", "chy").strip().lower()
     # Tela ao vivo (VNC do painel). Host vazio = o mesmo do OPCUA_URL.
     vnc_enabled: bool = _bool("VNC_ENABLED", os.getenv("MACHINE_PROFILE", "chy").strip().lower() == "em63")
