@@ -60,20 +60,26 @@ class Storage:
             out[tag].append([b, v])
         return out
 
+    # maior aumento aceito entre duas leituras seguidas (leituras a cada poucos segundos)
+    MAX_STEP = 1000
+
     def increments(self, tag: str, since: float, bucket: float) -> list[list[float]]:
         """Quanto um contador subiu em cada intervalo (ex.: peças por hora).
 
         Soma só os aumentos entre leituras seguidas, então um contador zerado
-        na máquina não vira um número negativo nem um pico falso.
+        na máquina não vira um número negativo nem um pico falso. Também ignora o
+        salto que parte de 0 (painel ainda sem dados, logo depois de conectar) e
+        saltos acima de MAX_STEP entre duas leituras, que não são produção real.
         """
         with self._lock:
             rows = self._conn.execute(
-                "SELECT b, SUM(CASE WHEN d > 0 THEN d ELSE 0 END) FROM ("
+                "SELECT b, SUM(CASE WHEN d > 0 AND d <= ? AND prev <> 0 THEN d ELSE 0 END) FROM ("
                 "  SELECT CAST(ts / ? AS INTEGER) * ? AS b,"
+                "         LAG(value) OVER (ORDER BY ts) AS prev,"
                 "         value - LAG(value) OVER (ORDER BY ts) AS d"
                 "  FROM samples WHERE tag=? AND ts>=? AND value IS NOT NULL"
                 ") GROUP BY b ORDER BY b",
-                (bucket, bucket, tag, since),
+                (self.MAX_STEP, bucket, bucket, tag, since),
             ).fetchall()
         return [[b, float(v or 0)] for b, v in rows]
 

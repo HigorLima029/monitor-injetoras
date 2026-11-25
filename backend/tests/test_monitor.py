@@ -65,6 +65,16 @@ def test_incrementos_por_hora():
     assert sum(v for _, v in per) == 16
 
 
+def test_incrementos_ignoram_salto_de_zero_e_saltos_impossiveis():
+    s = Storage(":memory:")
+    base = time.time() - 3600
+    # painel mandou 0 ao conectar, depois o contador real; depois um salto absurdo
+    for i, count in enumerate([0, 22327, 22328, 22330, 90000, 90001]):
+        s.add_samples(base + i * 10, {"ProductionCount": float(count)})
+    per = s.increments("ProductionCount", base - 1, 3600)
+    assert sum(v for _, v in per) == 4  # 22327->22328->22330 e 90000->90001
+
+
 def test_api_com_simulador(tmp_path, monkeypatch):
     from fastapi.testclient import TestClient
 
