@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from asyncua import Client, ua
 
+from .inovance_alarms import INO_ALARMS, ino_alarm_tag
 from .sources import close_client
 
 # Pasta (Object) onde ficam as variaveis da aplicacao, dentro de PLC > Modules > <Default>.
@@ -59,8 +60,7 @@ COUNT_SCALE = 65536  # Hi*65536 + Low: "开模总数高/低 16 位" na planilha 
 
 STATE_FIELD = "Operate State"
 OPERATE_STATE = {0x00: 1.0, 0x03: 2.0, 0x05: 3.0, 0x09: 3.0}
-ALARM_FIELDS = ["Alarm1", "Alarm2"]
-ALARM_ERROR = "WarnMachineError"
+ALARM_FIELDS = ["Alarm1", "Alarm2"]  # cada um traz o codigo de um alarme ativo (0 = nenhum)
 
 # todos os nomes brutos que o translate() precisa ler do painel
 _SOURCE_NAMES = sorted(set(SIMPLE.values()) | {COUNT_HI, COUNT_LOW, STATE_FIELD, *ALARM_FIELDS})
@@ -100,16 +100,26 @@ def translate(raw: dict[str, object]) -> dict[str, object]:
     out["DeviceOnOff"] = 1.0
     out["ProductionStatus"] = 1.0 if state is not None and int(state) in (3, 5, 9) else 0.0
 
-    alarm = any((_num(raw.get(f)) or 0) != 0 for f in ALARM_FIELDS)
-    out[ALARM_ERROR] = 1.0 if alarm else 0.0
     return out
+
+
+def active_alarm_codes(raw: dict[str, object]) -> set[int]:
+    """Codigos dos alarmes ativos publicados em Alarm1/Alarm2 (0 = nenhum)."""
+    codes: set[int] = set()
+    for field in ALARM_FIELDS:
+        v = _num(raw.get(field))
+        if v is not None and v > 0:
+            codes.add(int(v))
+    return codes
 
 
 INTERNAL_TAGS = sorted(
     set(SIMPLE.keys())
     | {"ProductionCount", "ProductionGoodCount", "ProductionCycle",
-       "OperatorMode", "DeviceOnOff", "ProductionStatus", ALARM_ERROR}
+       "OperatorMode", "DeviceOnOff", "ProductionStatus"}
 )
+# um alarme por codigo conhecido (WarnIno<HEX>), cada um com o nome em portugues
+ALARM_TAGS = [ino_alarm_tag(c) for c in sorted(INO_ALARMS)]
 
 
 class InovanceSource:
@@ -122,6 +132,7 @@ class InovanceSource:
         self.namespace = namespace
         self._client: Client | None = None
         self._nodes: dict[str, object] = {}  # browse name -> node da pasta App
+        self._seen_alarms: set[int] = set()     # codigos fora da tabela que ja apareceram
 
     async def connect(self) -> None:
         client = Client(self.url, timeout=30, watchdog_intervall=30)
@@ -172,7 +183,8 @@ class InovanceSource:
         if not self._nodes:
             self._nodes = await self._map_app()
         # tags internas + os nomes brutos (para a tela Variaveis)
-        return INTERNAL_TAGS + [f"INO.{n}" for n in sorted(self._nodes)]
+        extra = [ino_alarm_tag(c) for c in sorted(self._seen_alarms)]
+        return INTERNAL_TAGS + ALARM_TAGS + extra + [f"INO.{n}" for n in sorted(self._nodes)]
 
     async def _read_names(self, names: list[str]) -> dict[str, object]:
         assert self._client is not None
@@ -198,6 +210,13 @@ class InovanceSource:
         raw = await self._read_names(sorted(names))
         internal = translate(raw) if need_internal else {}
         out: dict[str, object] = {}
+        if need_internal and all(f in raw for f in ALARM_FIELDS):
+            # Todos os alarmes conhecidos (e os codigos novos ja vistos) vao juntos, pedidos
+            # ou nao: um codigo novo tambem chega ao coletor e vira alarme com o codigo no nome.
+            active = active_alarm_codes(raw)
+            self._seen_alarms |= active - set(INO_ALARMS)
+            for code in set(INO_ALARMS) | self._seen_alarms:
+                out[ino_alarm_tag(code)] = 1.0 if code in active else 0.0
         for t in tags:
             if t.startswith("INO."):
                 out[t] = raw.get(t[4:])
