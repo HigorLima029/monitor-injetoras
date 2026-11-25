@@ -4,6 +4,7 @@ import type { Info, MachineList } from './api'
 import { activateMachine, getJson, usePoll, useLive } from './api'
 import { MachinesPage } from './MachinesPage'
 import { StateBadge } from './components/widgets'
+import { EstoPanel } from './hmi/EstoPanel'
 import { HmiPanel } from './hmi/HmiPanel'
 import { TelaAoVivo } from './TelaAoVivo'
 import { ago } from './format'
@@ -15,7 +16,9 @@ type PageId = 'maquinas' | 'geral' | 'painel' | 'tela' | 'temperaturas' | 'produ
 const PAGES: { id: PageId; label: string; icon: ReactNode; render: (p: PageProps) => ReactNode }[] = [
   { id: 'maquinas', label: 'Máquinas', icon: <Server size={18} />, render: () => null /* desenhada no App, que passa os callbacks */ },
   { id: 'geral', label: 'Visão geral', icon: <LayoutDashboard size={18} />, render: (p) => <Overview {...p} /> },
-  { id: 'painel', label: 'Painel da máquina', icon: <Monitor size={18} />, render: (p) => <HmiPanel status={p.live?.status ?? null} /> },
+  { id: 'painel', label: 'Painel da máquina', icon: <Monitor size={18} />, render: (p) => p.info.profile === 'inovance'
+    ? <EstoPanel status={p.live?.status ?? null} />
+    : <HmiPanel status={p.live?.status ?? null} /> },
   // key: trocar de máquina monta uma Tela ao vivo nova (senha e sessão do painel novo).
   { id: 'tela', label: 'Tela ao vivo', icon: <MonitorPlay size={18} />, render: (p) => <TelaAoVivo key={p.info.machine_id} machineName={p.info.machine_name} kind={p.info.kind} /> },
   { id: 'temperaturas', label: 'Temperaturas', icon: <Thermometer size={18} />, render: (p) => <Temperatures {...p} /> },
@@ -99,11 +102,11 @@ export default function App() {
     return () => window.clearTimeout(id)
   }, [changedNotice])
 
-  // A réplica da tela é da IHM CHY; num painel B&R/Beckhoff ela não se aplica.
+  // A réplica da tela existe para a IHM CHY e para o painel ESTO (Inovance); num B&R/Beckhoff não se aplica.
   const pages = noMachine
     ? PAGES.filter((p) => p.id === 'maquinas')
     : PAGES.filter((p) =>
-        (p.id !== 'painel' || info?.kind === 'chy' || info?.kind === 'demo' || (info?.kind === undefined && info?.profile === 'chy')) &&
+        (p.id !== 'painel' || info?.kind === 'chy' || info?.kind === 'demo' || info?.kind === 'inovance' || (info?.kind === undefined && info?.profile === 'chy')) &&
         (p.id !== 'tela' || info?.vnc === true))
   // Sem máquina aberta só existe Máquinas; com ela, uma página que deixou de existir cai na Visão geral.
   const current = pages.find((p) => p.id === page) ?? pages.find((p) => p.id === 'geral') ?? pages[0]

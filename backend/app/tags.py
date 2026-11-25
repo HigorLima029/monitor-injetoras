@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 
 from .ads_source import ADS_ALARMS
+from .inovance_alarms import ino_alarm_label
 
 # (tag, rótulo, unidade, grupo)
 KPI_TAGS: list[tuple[str, str, str, str]] = [
@@ -147,6 +148,9 @@ def humanize(tag: str) -> str:
 
 
 def alarm_label(tag: str) -> str:
+    ino = ino_alarm_label(tag)  # painéis ESTO/Inovance: WarnIno<HEX>
+    if ino is not None:
+        return ino
     if tag.startswith("WarnAds"):  # painéis Beckhoff: WarnAds<ID>
         try:
             alarm_id = int(tag[len("WarnAds"):])

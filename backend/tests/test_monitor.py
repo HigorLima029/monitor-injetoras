@@ -169,7 +169,7 @@ def test_le_painel_inovance():
             vals = await src.read(["ProductionCount", "ProductionGoodCount", "CycleMonitor",
                                    "ProductionCycle", "TempNozzleNow", "TempZ1Now", "TempZ5Now",
                                    "TempNozzle", "InjectLastTime", "PlastLastTime", "OperatorMode",
-                                   "DeviceOnOff", "ProductionStatus", "WarnMachineError",
+                                   "DeviceOnOff", "ProductionStatus", "WarnIno100101",
                                    "INO.Temp7 Real"])
             assert vals["ProductionCount"] == 67881.0 and vals["ProductionGoodCount"] == 67881.0
             assert vals["CycleMonitor"] == 28.5 and vals["ProductionCycle"] == 28.5
@@ -177,17 +177,26 @@ def test_le_painel_inovance():
             assert vals["TempZ5Now"] == 160.0 and vals["TempNozzle"] == 215.0
             assert vals["InjectLastTime"] == 1.5 and vals["PlastLastTime"] == 6.0
             assert vals["OperatorMode"] == 3.0 and vals["DeviceOnOff"] == 1.0
-            assert vals["ProductionStatus"] == 1.0 and vals["WarnMachineError"] == 0.0
+            assert vals["ProductionStatus"] == 1.0 and vals["WarnIno100101"] == 0.0
+            assert "WarnIno29100101" in tags  # alarmes conhecidos entram na lista
             assert vals["INO.Temp7 Real"] == 50.0  # leitura crua passa direto
 
             col = Collector(src, Storage(":memory:"), poll_seconds=0.1, full_poll_seconds=999)
             col.tags = tags
             await col.poll_once()
             assert col.machine_state() == "parada"
-            await nodes["Alarm1"].write_value(1.0)  # só o servidor de teste muda
+            await nodes["Alarm1"].write_value(float(0x29100101))  # porta de segurança aberta
+            await nodes["Alarm2"].write_value(float(0x12345678))  # código fora da tabela
             await col.poll_once()
-            assert col.active_alarms == {"WarnMachineError"} and col.machine_state() == "alarme"
+            assert col.active_alarms == {"WarnIno29100101", "WarnIno12345678"}
+            assert col.machine_state() == "alarme"
+            from app.tags import alarm_label
+            assert alarm_label("WarnIno29100101") == "Porta de segurança aberta"
+            assert alarm_label("WarnIno12345678") == "Alarme do painel 0x12345678"
             await nodes["Alarm1"].write_value(0.0)
+            await nodes["Alarm2"].write_value(0.0)
+            await col.poll_once()
+            assert col.active_alarms == set()
             await nodes["OpenCnt Low Real"].write_value(2346.0)  # ciclou: +1 peça
             await col.poll_once()
             assert col.machine_state() == "produzindo"
