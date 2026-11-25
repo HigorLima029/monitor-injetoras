@@ -177,16 +177,11 @@ class InovanceSource:
         for i in range(0, len(present), self.CHUNK):
             chunk = present[i:i + self.CHUNK]
             nodes = [self._nodes[n] for n in chunk]
-            try:
-                values = await self._client.read_values(nodes)
-            except ua.UaStatusCodeError:
-                # algum no que o painel recusa: le um a um (erro de rede sobe direto)
-                values = []
-                for node in nodes:
-                    try:
-                        values.append(await node.read_value())
-                    except ua.UaStatusCodeError:
-                        values.append(None)
+            # Uma unica leitura por bloco. No que o painel recusa vira None, sem cair
+            # para leitura um a um (pelo 4G, centenas de idas e voltas estouram o tempo).
+            results = await self._client.read_attributes(nodes, ua.AttributeIds.Value)
+            values = [r.Value.Value if r.StatusCode.is_good() and r.Value is not None else None
+                      for r in results]
             out.update(zip(chunk, values))
         return out
 
