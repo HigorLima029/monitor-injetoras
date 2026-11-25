@@ -131,17 +131,24 @@ class InovanceSource:
             await close_client(client)
 
     async def _find_app(self, node, depth: int):
-        """Procura a pasta 'App' descendo pela arvore de objetos (PLC > Modules > <Default> > App)."""
+        """Procura a pasta 'App' descendo pela arvore de objetos (PLC > Modules > <Default> > App).
+
+        Uma unica chamada de browse por pasta (nome e tipo ja vem na resposta) e sem entrar
+        na arvore padrao 'Server': pelo 4G cada ida e volta custa dezenas de ms.
+        """
         if depth > 6:
             return None
-        for child in await node.get_children():
-            name = (await child.read_browse_name()).Name
-            if name == APP_FOLDER:
-                return child
-            if await child.read_node_class() == ua.NodeClass.Object:
-                found = await self._find_app(child, depth + 1)
-                if found is not None:
-                    return found
+        descs = await node.get_children_descriptions()
+        for d in descs:
+            if d.BrowseName.Name == APP_FOLDER:
+                return self._client.get_node(d.NodeId)
+        for d in descs:
+            if d.NodeClass != ua.NodeClass.Object or d.BrowseName.Name == "Server" \
+                    or d.NodeId == ua.NodeId(ua.ObjectIds.Server):
+                continue
+            found = await self._find_app(self._client.get_node(d.NodeId), depth + 1)
+            if found is not None:
+                return found
         return None
 
     async def _map_app(self) -> dict[str, object]:
@@ -152,9 +159,9 @@ class InovanceSource:
                 "Nao achei a pasta 'App' no servidor OPC-UA (nao e um painel Inovance?)"
             )
         nodes: dict[str, object] = {}
-        for child in await app.get_children():
-            if await child.read_node_class() == ua.NodeClass.Variable:
-                nodes[(await child.read_browse_name()).Name] = child
+        for d in await app.get_children_descriptions():
+            if d.NodeClass == ua.NodeClass.Variable:
+                nodes[d.BrowseName.Name] = self._client.get_node(d.NodeId)
         return nodes
 
     async def list_tags(self) -> list[str]:
@@ -170,16 +177,11 @@ class InovanceSource:
         for i in range(0, len(present), self.CHUNK):
             chunk = present[i:i + self.CHUNK]
             nodes = [self._nodes[n] for n in chunk]
-            try:
-                values = await self._client.read_values(nodes)
-            except ua.UaStatusCodeError:
-                # algum no que o painel recusa: le um a um (erro de rede sobe direto)
-                values = []
-                for node in nodes:
-                    try:
-                        values.append(await node.read_value())
-                    except ua.UaStatusCodeError:
-                        values.append(None)
+            # Uma unica leitura por bloco. No que o painel recusa vira None, sem cair
+            # para leitura um a um (pelo 4G, centenas de idas e voltas estouram o tempo).
+            results = await self._client.read_attributes(nodes, ua.AttributeIds.Value)
+            values = [r.Value.Value if r.StatusCode.is_good() and r.Value is not None else None
+                      for r in results]
             out.update(zip(chunk, values))
         return out
 
