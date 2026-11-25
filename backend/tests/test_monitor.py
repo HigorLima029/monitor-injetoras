@@ -161,7 +161,7 @@ def test_le_painel_inovance():
                                    "TempNozzle", "InjectLastTime", "PlastLastTime", "OperatorMode",
                                    "DeviceOnOff", "ProductionStatus", "WarnMachineError",
                                    "INO.Temp7 Real"])
-            assert vals["ProductionCount"] == 12345.0 and vals["ProductionGoodCount"] == 12345.0
+            assert vals["ProductionCount"] == 67881.0 and vals["ProductionGoodCount"] == 67881.0
             assert vals["CycleMonitor"] == 28.5 and vals["ProductionCycle"] == 28.5
             assert vals["TempNozzleNow"] == 210.0 and vals["TempZ1Now"] == 200.0
             assert vals["TempZ5Now"] == 160.0 and vals["TempNozzle"] == 215.0

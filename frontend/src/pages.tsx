@@ -41,11 +41,12 @@ export function Overview({ info, live, tokens }: PageProps) {
   const scrap = scrapPct(prod)
   const since = (tag: string) => alarms?.events.find((e) => e.tag === tag && e.ended === null)?.started
   const beckhoff = info.profile === 'ads'
+  const comModo = beckhoff || info.profile === 'inovance'
   const modo = num(v.OperatorMode)
 
   return (
     <div className="stack">
-      <div className={beckhoff ? 'grid tiles cinco' : 'grid tiles'}>
+      <div className={comModo ? 'grid tiles cinco' : 'grid tiles'}>
         <Tile icon={<Package size={16} aria-hidden="true" />} label="Peças nas últimas 8 h"
           value={fmt(prod?.produced ?? null, 0)}
           sub={`Contador da máquina: ${fmt(num(v.ProductionCount), 0)}`} />
@@ -58,10 +59,10 @@ export function Overview({ info, live, tokens }: PageProps) {
         <Tile icon={<AlertTriangle size={16} aria-hidden="true" />} label="Alarmes ativos"
           value={String(active)} alert={active > 0}
           sub={`${alarms?.monitored ?? '—'} alarmes monitorados`} />
-        {beckhoff && (
+        {comModo && (
           <Tile icon={<SlidersHorizontal size={16} aria-hidden="true" />} label="Modo de operação"
             value={modo === null ? '—' : (MODOS_BECKHOFF[modo] ?? `Código ${modo}`)}
-            sub="Lâmpada acesa no teclado do painel" />
+            sub={beckhoff ? 'Lâmpada acesa no teclado do painel' : 'Operate State do painel'} />
         )}
       </div>
 

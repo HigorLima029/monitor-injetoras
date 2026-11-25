@@ -1,4 +1,4 @@
-"""Fonte OPC-UA para injetoras Chen Hsong com controlador Inovance (painel IT7000).
+"""Fonte OPC-UA para injetoras Chen Hsong com controlador Inovance (painel Chen Hsong s6410, app warm15sopcua).
 
 O painel expoe um servidor OPC-UA em ns=1 com nos NUMERICOS e nomes em ingles, sob
 a arvore PLC > Modules > <Default> > App. Aqui esses nos sao lidos por NOME (browse
@@ -55,9 +55,10 @@ SIMPLE = {
 # contador de pecas: dois registradores (parte alta e baixa)
 COUNT_HI = "OpenCnt Hi Real"
 COUNT_LOW = "OpenCnt Low Real"
-COUNT_SCALE = 10000  # Hi*10000 + Low (a confirmar quando a maquina ciclar)
+COUNT_SCALE = 65536  # Hi*65536 + Low: "开模总数高/低 16 位" na planilha oficial de pontos OPC-UA
 
 STATE_FIELD = "Operate State"
+OPERATE_STATE = {0x00: 1.0, 0x03: 2.0, 0x05: 3.0, 0x09: 3.0}
 ALARM_FIELDS = ["Alarm1", "Alarm2"]
 ALARM_ERROR = "WarnMachineError"
 
@@ -92,9 +93,12 @@ def translate(raw: dict[str, object]) -> dict[str, object]:
     out["ProductionCycle"] = out.get("CycleMonitor")
 
     state = _num(raw.get(STATE_FIELD))
-    out["OperatorMode"] = state
+    # Operate State (planilha oficial): 0x00 manual, 0x03 semiautomatico, 0x05 automatico por
+    # fotocelula, 0x09 automatico por tempo. Convertido para os codigos do Monitor
+    # (1 manual, 2 semiautomatico, 3 automatico); valor desconhecido passa cru.
+    out["OperatorMode"] = None if state is None else OPERATE_STATE.get(int(state), state)
     out["DeviceOnOff"] = 1.0
-    out["ProductionStatus"] = 1.0 if (state or 0) != 0 else 0.0
+    out["ProductionStatus"] = 1.0 if state is not None and int(state) in (3, 5, 9) else 0.0
 
     alarm = any((_num(raw.get(f)) or 0) != 0 for f in ALARM_FIELDS)
     out[ALARM_ERROR] = 1.0 if alarm else 0.0
@@ -109,7 +113,7 @@ INTERNAL_TAGS = sorted(
 
 
 class InovanceSource:
-    """Le o OPC-UA do painel Inovance (IT7000) e entrega nos nomes internos do Monitor."""
+    """Le o OPC-UA do painel Chen Hsong (controlador Inovance) e entrega nos nomes internos do Monitor."""
 
     CHUNK = 200
 

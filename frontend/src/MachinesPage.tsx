@@ -7,7 +7,7 @@ const KIND_LABEL: Record<MachineKind, string> = {
   chy: 'CHY · CHL3200',
   em63: 'B&R · Euromap 63',
   ads: 'Beckhoff · ADS',
-  inovance: 'Inovance · IT7000',
+  inovance: 'Inovance · painel Chen Hsong',
   demo: 'Simulada',
 }
 
