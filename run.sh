@@ -10,7 +10,11 @@ if [ ! -d backend/.venv ]; then
   backend/.venv/bin/pip install -q -r backend/requirements.txt
 fi
 
-if [ ! -f frontend/dist/index.html ]; then
+# Recompila o painel se não existir ou se algum arquivo da tela for mais novo que o build
+# (ex.: depois de um git pull). Sem isso o navegador recebe a tela antiga.
+if [ ! -f frontend/dist/index.html ] || \
+   [ -n "$(find frontend/src frontend/index.html frontend/package.json frontend/package-lock.json \
+            frontend/vite.config.ts -newer frontend/dist/index.html -print -quit 2>/dev/null)" ]; then
   (cd frontend && npm install && npm run build)
 fi
 
