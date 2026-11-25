@@ -11,7 +11,7 @@ from asyncua import Server, ua
 APP_VARS = {
     "Alarm1": (4279238665, 0.0),
     "Alarm2": (4279238666, 0.0),
-    "Operate State": (1441794, 3.0),           # != 0 -> produzindo
+    "Operate State": (1441794, 5.0),           # 0x05 = automatico por fotocelula
     "Temp1 Real": (85327875, 210.0),           # bico
     "Temp2 Real": (85327876, 200.0),           # zona 1
     "Temp3 Real": (85327877, 190.0),
@@ -36,8 +36,8 @@ APP_VARS = {
     "Max InjPrs Real": (269877268, 120.0),
     "Inject Max Speed": (269877324, 95.0),
     "Inject Min Pos": (269877274, 8.0),
-    "OpenCnt Hi Real": (538312706, 1.0),       # 1*10000
-    "OpenCnt Low Real": (538312707, 2345.0),   # + 2345 = 12345
+    "OpenCnt Hi Real": (538312706, 1.0),       # 1*65536
+    "OpenCnt Low Real": (538312707, 2345.0),   # + 2345 = 67881
 }
 
 
