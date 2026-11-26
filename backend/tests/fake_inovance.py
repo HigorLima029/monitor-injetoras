@@ -26,9 +26,9 @@ APP_VARS = {
     "Temp5 Set": (85131268, 175.0),
     "Temp6 Set": (85131269, 165.0),
     "Temp7 Set": (85131270, 55.0),
-    "CycTime Real": (1441832, 28.5),
-    "Inj Tm Real": (269877250, 1.5),
-    "Charge Tm Real": (269877258, 6.0),
+    "CycTime Real": (1441832, 285.0),         # /10 -> 28,5 s
+    "Inj Tm Real": (269877250, 150.0),         # /100 -> 1,5 s
+    "Charge Tm Real": (269877258, 600.0),      # /100 -> 6,0 s
     "Charge Pos Real": (269877261, 115.0),
     "Close Tm Real": (538312711, 2.0),
     "Open Tm Real": (538312718, 1.8),
@@ -36,6 +36,7 @@ APP_VARS = {
     "Max InjPrs Real": (269877268, 120.0),
     "Inject Max Speed": (269877324, 95.0),
     "Inject Min Pos": (269877274, 8.0),
+    "Lv3.Manager": (99999901, 5959.0),         # senha: o Monitor nunca pode ler
     "OpenCnt Hi Real": (538312706, 1.0),       # 1*65536
     "OpenCnt Low Real": (538312707, 2345.0),   # + 2345 = 67881
 }
