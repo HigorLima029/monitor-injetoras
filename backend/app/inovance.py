@@ -8,8 +8,10 @@ funcionarem sem mudanca.
 
 PRIMEIRA VERSAO (mapeamento a confirmar com a maquina PRODUZINDO, pois parada vem 0):
   - ordem das temperaturas: assumimos Temp1 = bico, Temp2..6 = zonas 1..5;
-  - contador de pecas: OpenCnt Hi/Low combinados como Hi*10000 + Low;
-  - modo: Operate State != 0 -> produzindo (enum real a confirmar).
+  - contador de pecas: OpenCnt Hi/Low combinados como Hi*65536 + Low (planilha oficial);
+  - modo: Operate State 0 manual, 3 semiauto, 5/9 automatico (planilha oficial);
+  - escalas: ver SCALE (conferidas com fotos do painel).
+  - as senhas de nivel (Lv1..Lv3) publicadas pelo painel nunca sao lidas (HIDDEN_PREFIXES).
 
 IMPORTANTE: somente leitura. Nenhuma escrita OPC-UA (o teste de seguranca cobre este arquivo).
 """
@@ -53,6 +55,24 @@ SIMPLE = {
     "TempZ5": "Temp6 Set",
 }
 
+# O painel publica inteiros; fator para chegar na unidade da tela do painel. Conferido com fotos do
+# painel real (26/11): posicoes/tempos programados /100, velocidades /10, Tp Ciclo 86 -> 8,6 s.
+# Tempos e posicoes REAIS seguem o mesmo padrao dos programados (confirmar com a maquina ciclando).
+SCALE = {
+    "CycTime Real": 0.1,
+    "Inj Tm Real": 0.01,
+    "Charge Tm Real": 0.01,
+    "Close Tm Real": 0.01,
+    "Open Tm Real": 0.01,
+    "Eject Tm Real": 0.01,
+    "Inject Max Speed": 0.1,
+    "Inject Min Pos": 0.01,
+    "Charge Pos Real": 0.01,
+}
+
+# Variaveis que o painel publica mas o Monitor nunca le nem mostra (senhas de nivel de acesso).
+HIDDEN_PREFIXES = ("Lv",)
+
 # contador de pecas: dois registradores (parte alta e baixa)
 COUNT_HI = "OpenCnt Hi Real"
 COUNT_LOW = "OpenCnt Low Real"
@@ -82,7 +102,8 @@ def translate(raw: dict[str, object]) -> dict[str, object]:
     out: dict[str, object] = {}
     for tag, field in SIMPLE.items():
         if field in raw:
-            out[tag] = _num(raw[field])
+            v = _num(raw[field])
+            out[tag] = None if v is None else round(v * SCALE.get(field, 1.0), 4)
 
     hi, low = _num(raw.get(COUNT_HI)), _num(raw.get(COUNT_LOW))
     if hi is not None or low is not None:
@@ -175,8 +196,9 @@ class InovanceSource:
             )
         nodes: dict[str, object] = {}
         for d in await app.get_children_descriptions():
-            if d.NodeClass == ua.NodeClass.Variable:
-                nodes[d.BrowseName.Name] = self._client.get_node(d.NodeId)
+            name = d.BrowseName.Name
+            if d.NodeClass == ua.NodeClass.Variable and not name.startswith(HIDDEN_PREFIXES):
+                nodes[name] = self._client.get_node(d.NodeId)
         return nodes
 
     async def list_tags(self) -> list[str]:

@@ -168,7 +168,7 @@
 
 /* barra de botões inferior */
 .e-nav {
-  display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 4px; padding: 6px;
+  display: grid; grid-template-columns: repeat(9, minmax(0, 1fr)); gap: 4px; padding: 6px;
   background: linear-gradient(#cbd6e3, #b4c2d3); border-top: 1px solid var(--e-rule);
 }
 .e-nav button {
@@ -201,3 +201,5 @@
 .esto th, .esto td { position: static; vertical-align: middle; }
 .esto .e-grid td { padding: 1px 2px; }
 .esto .e-pair .e-f { flex: 0 0 90px; min-width: 0; }
+.esto .e-f.e-txt { text-align: center; width: 100%; }
+.esto .e-grid thead tr + tr th { font-size: 12px; }

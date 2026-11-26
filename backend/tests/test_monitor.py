@@ -176,6 +176,7 @@ def test_le_painel_inovance():
             assert vals["TempNozzleNow"] == 210.0 and vals["TempZ1Now"] == 200.0
             assert vals["TempZ5Now"] == 160.0 and vals["TempNozzle"] == 215.0
             assert vals["InjectLastTime"] == 1.5 and vals["PlastLastTime"] == 6.0
+            assert not any(t.startswith("INO.Lv") for t in tags)  # senhas de nivel ficam de fora
             assert vals["OperatorMode"] == 3.0 and vals["DeviceOnOff"] == 1.0
             assert vals["ProductionStatus"] == 1.0 and vals["WarnIno100101"] == 0.0
             assert "WarnIno29100101" in tags  # alarmes conhecidos entram na lista
