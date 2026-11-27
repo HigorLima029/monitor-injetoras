@@ -87,6 +87,7 @@ class MachineIn(BaseModel):
     vnc_view_password: str = ""
     vnc_control_password: str = ""
     notes: str = ""
+    stop_min_seconds: int = 120
 
 
 class MachineUpdate(BaseModel):
@@ -104,6 +105,7 @@ class MachineUpdate(BaseModel):
     vnc_view_password: str | None = None
     vnc_control_password: str | None = None
     notes: str | None = None
+    stop_min_seconds: int | None = None
     clear_vnc_view_password: bool = False
     clear_vnc_control_password: bool = False
 
@@ -342,6 +344,91 @@ def production(hours: float = Query(8, ge=1, le=24 * 31)):
         "bad": sum(v for _, v in bad_bucket),
         "avg_cycle": (sum(cycle_vals) / len(cycle_vals)) if cycle_vals else None,
     }
+
+
+# ---- paradas -----------------------------------------------------------
+class StopUpdate(BaseModel):
+    reason: str | None = None  # None = sem motivo
+    note: str | None = None  # o que aconteceu (texto livre)
+
+
+class ReasonIn(BaseModel):
+    label: str
+
+
+class ReasonUpdate(BaseModel):
+    label: str | None = None
+    active: bool | None = None
+
+
+@app.get("/api/stops")
+def stops(hours: float = Query(24, ge=1, le=24 * 31)):
+    """Paradas da máquina aberta no período, com o tempo parado somado por motivo."""
+    c = _c(app)
+    now = time.time()
+    since = now - hours * 3600
+    labels = _mgr(app).store.reason_labels()
+    rows = c.storage.stops(since)
+    by_reason: dict[str, dict] = {}
+    for r in rows:
+        end = r["ended"] or now
+        r["duration"] = max(0.0, end - r["started"])  # duração total da parada
+        r["in_period"] = max(0.0, end - max(r["started"], since))  # parte dentro do período
+        r["open"] = r["ended"] is None
+        r["reason_label"] = labels.get(r["reason"] or "", r["reason"]) if r["reason"] else None
+        key = r["reason"] or ""
+        agg = by_reason.setdefault(key, {"reason": r["reason"], "label": r["reason_label"] or "Sem motivo",
+                                         "seconds": 0.0, "count": 0})
+        agg["seconds"] += r["in_period"]
+        agg["count"] += 1
+    summary = sorted(by_reason.values(), key=lambda a: -a["seconds"])
+    return {
+        "since": since,
+        "stops": rows,
+        "summary": summary,
+        "total_seconds": sum(a["seconds"] for a in summary),
+        "unclassified": sum(1 for r in rows if not r["reason"]),
+    }
+
+
+@app.put("/api/stops/{id}")
+def classify_stop(id: int, body: StopUpdate):
+    reason = body.reason or None
+    note = None if body.note is None else body.note.strip()[:500]
+    known = _mgr(app).store.reason_labels()
+    if reason is None and note:
+        reason = "outro"  # escreveu o que aconteceu sem escolher motivo: fica como Outro
+    if reason is not None and reason not in known:
+        raise HTTPException(422, "motivo desconhecido")
+    try:
+        r = _c(app).storage.classify_stop(id, reason, note)
+    except KeyError:
+        raise HTTPException(404, "Parada não encontrada")
+    r["reason_label"] = known.get(r["reason"] or "") if r["reason"] else None
+    return r
+
+
+@app.get("/api/stop-reasons")
+def stop_reasons():
+    return {"reasons": _mgr(app).store.list_reasons()}
+
+
+@app.post("/api/stop-reasons", status_code=201)
+def add_stop_reason(body: ReasonIn):
+    try:
+        return _mgr(app).store.add_reason(body.label)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.put("/api/stop-reasons/{code}")
+def update_stop_reason(code: str, body: ReasonUpdate):
+    try:
+        return _mgr(app).store.update_reason(code, body.label, body.active)
+    except KeyError:
+        raise HTTPException(404, "Motivo não encontrado")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
 
 
 @app.get("/api/alarms")
