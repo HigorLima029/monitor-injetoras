@@ -53,7 +53,33 @@ export interface Machine {
   profile: 'chy' | 'em63' | 'ads' | 'inovance'
   opcua_url: string
   status?: MachineStatus
+  mold?: MoldMount | null
 }
+
+/** Molde cadastrado. Peças = ciclos da máquina x cavidades ativas do molde montado. */
+export interface Mold {
+  id: number
+  code: string
+  name: string
+  cavities: number
+  active_cavities: number
+  notes: string
+  mounted_on?: { machine_id: number; machine_name: string } | null
+}
+
+/** Uma montagem de molde numa máquina (foto do molde no momento em que foi montado). */
+export interface MoldMount {
+  id: number
+  machine_id: number
+  mold_id: number | null
+  mold_code: string
+  mold_name: string
+  active_cavities: number
+  mounted_at: number
+  removed_at: number | null
+}
+
+export type MoldInput = { code: string; name: string; cavities: number; active_cavities?: number | null; notes: string }
 
 /**
  * Campos enviados ao cadastrar/editar; senha em branco = não enviar (o servidor mantém a atual).
@@ -184,6 +210,12 @@ export const deleteMachine = (id: number) => send<void>('DELETE', `/api/machines
 export const activateMachine = (id: number) => send<Machine>('POST', `/api/machines/${id}/activate`)
 export const testMachine = (id: number) =>
   send<{ online: boolean; latency_ms: number | null }>('POST', `/api/machines/${id}/test`)
+
+export const saveMold = (m: MoldInput, id?: number) =>
+  id === undefined ? send<Mold>('POST', '/api/molds', m) : send<Mold>('PUT', `/api/molds/${id}`, m)
+export const deleteMold = (id: number) => send<void>('DELETE', `/api/molds/${id}`)
+export const mountMold = (machineId: number, moldId: number | null) =>
+  send<{ current: MoldMount | null; history: MoldMount[] }>('PUT', `/api/machines/${machineId}/mold`, { mold_id: moldId })
 
 /** Busca uma URL e repete a cada `everyMs`. */
 export function usePoll<T>(url: string | null, everyMs = 30000) {

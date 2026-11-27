@@ -15,7 +15,8 @@ KPI_TAGS: list[tuple[str, str, str, str]] = [
     ("DeviceOnOff", "Máquina ligada", "", "estado"),
     ("OperatorMode", "Modo de operação", "", "estado"),
     ("ProductionStatus", "Status de produção", "", "estado"),
-    ("ProductionCount", "Peças produzidas", "pç", "producao"),
+    ("ProductionCount", "Ciclos (contador da máquina)", "ciclos", "producao"),
+    ("PieceCount", "Peças produzidas (ciclos x cavidades)", "pç", "producao"),
     ("ProductionGoodCount", "Peças boas", "pç", "producao"),
     ("BadProduction", "Peças ruins", "pç", "producao"),
     ("DefectCount", "Defeitos", "pç", "producao"),
@@ -64,6 +65,8 @@ EXTRA_SETPOINT_TAGS = ["TempZ6", "TempZ7", "TempZ8"]
 EXTRA_ACTUAL_TAGS = ["TempZ6Now", "TempZ7Now", "TempZ8Now"]
 
 # Tags gravadas no histórico (SQLite) a cada leitura.
+PIECE_TAG = "PieceCount"  # calculado pelo Monitor: ciclos x cavidades ativas do molde
+
 HISTORY_TAGS = [t[0] for t in KPI_TAGS] + SETPOINT_TAGS + EXTRA_SETPOINT_TAGS + EXTRA_ACTUAL_TAGS
 
 ALARM_PREFIX = "Warn"

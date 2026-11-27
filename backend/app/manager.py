@@ -84,7 +84,9 @@ class MachineManager:
         storage = Storage(str(mdir / f"{m.id}.db"))
         try:
             source = self.build_source(m)
-            return Collector(source, storage, s.poll_seconds, s.full_poll_seconds, s.retention_days)
+            store, mid = self.store, m.id
+            return Collector(source, storage, s.poll_seconds, s.full_poll_seconds, s.retention_days,
+                             cavities=lambda: store.active_cavities(mid))
         except Exception:
             storage.close()
             raise

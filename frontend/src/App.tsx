@@ -1,8 +1,9 @@
-import { AlertTriangle, Factory, Server, MonitorPlay, LayoutDashboard, ListTree, Monitor, Moon, Package, Sun, SunMoon, Thermometer } from 'lucide-react'
+import { AlertTriangle, Boxes, Factory, Server, MonitorPlay, LayoutDashboard, ListTree, Monitor, Moon, Package, Sun, SunMoon, Thermometer } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { Info, MachineList } from './api'
 import { activateMachine, getJson, usePoll, useLive } from './api'
 import { MachinesPage } from './MachinesPage'
+import { MoldsPage } from './MoldsPage'
 import { StateBadge } from './components/widgets'
 import { EstoPanel } from './hmi/EstoPanel'
 import { HmiPanel } from './hmi/HmiPanel'
@@ -11,10 +12,11 @@ import { ago } from './format'
 import { AlarmsPage, Overview, ProductionPage, Temperatures, Variables, type PageProps } from './pages'
 import { useTheme, type ThemeChoice } from './theme'
 
-type PageId = 'maquinas' | 'geral' | 'painel' | 'tela' | 'temperaturas' | 'producao' | 'alarmes' | 'variaveis'
+type PageId = 'maquinas' | 'moldes' | 'geral' | 'painel' | 'tela' | 'temperaturas' | 'producao' | 'alarmes' | 'variaveis'
 
 const PAGES: { id: PageId; label: string; icon: ReactNode; render: (p: PageProps) => ReactNode }[] = [
   { id: 'maquinas', label: 'Máquinas', icon: <Server size={18} />, render: () => null /* desenhada no App, que passa os callbacks */ },
+  { id: 'moldes', label: 'Moldes', icon: <Boxes size={18} />, render: () => null /* não depende da máquina aberta */ },
   { id: 'geral', label: 'Visão geral', icon: <LayoutDashboard size={18} />, render: (p) => <Overview {...p} /> },
   { id: 'painel', label: 'Painel da máquina', icon: <Monitor size={18} />, render: (p) => p.info.profile === 'inovance'
     ? <EstoPanel status={p.live?.status ?? null} />
@@ -104,7 +106,7 @@ export default function App() {
 
   // A réplica da tela existe para a IHM CHY e para o painel ESTO (Inovance); num B&R/Beckhoff não se aplica.
   const pages = noMachine
-    ? PAGES.filter((p) => p.id === 'maquinas')
+    ? PAGES.filter((p) => p.id === 'maquinas' || p.id === 'moldes')
     : PAGES.filter((p) =>
         (p.id !== 'painel' || info?.kind === 'chy' || info?.kind === 'demo' || info?.kind === 'inovance' || (info?.kind === undefined && info?.profile === 'chy')) &&
         (p.id !== 'tela' || info?.vnc === true))
@@ -119,7 +121,7 @@ export default function App() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [info?.machine_id, info?.kind, info?.vnc, noMachine])
   useEffect(() => {
-    if (noMachine && page !== 'maquinas') go('maquinas')
+    if (noMachine && page !== 'maquinas' && page !== 'moldes') go('maquinas')
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [noMachine])
 
@@ -233,6 +235,7 @@ export default function App() {
 
         {currentId === 'maquinas'
           ? <MachinesPage onOpened={opened} onChanged={() => { reloadMachines(); reloadInfo() }} />
+          : currentId === 'moldes' ? <MoldsPage />
           : info ? current.render({ info, live, tokens, now }) : !infoError && <p className="muted">Carregando…</p>}
       </main>
     </div>

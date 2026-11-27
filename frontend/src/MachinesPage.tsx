@@ -1,7 +1,8 @@
-import { AlertTriangle, Check, Pencil, Plus, Trash2, Wifi, X } from 'lucide-react'
+import { AlertTriangle, Boxes, Check, History, Pencil, Plus, Trash2, Wifi, X } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState, type FormEvent } from 'react'
-import { activateMachine, ApiError, deleteMachine, saveMachine, testMachine, usePoll } from './api'
-import type { Machine, MachineInput, MachineKind, MachineList } from './api'
+import { activateMachine, ApiError, deleteMachine, getJson, mountMold, saveMachine, testMachine, usePoll } from './api'
+import type { Machine, MachineInput, MachineKind, MachineList, Mold, MoldMount } from './api'
+import { dateTime } from './format'
 
 const KIND_LABEL: Record<MachineKind, string> = {
   chy: 'CHY · CHL3200',
@@ -212,6 +213,7 @@ export function MachinesPage({ onOpened, onChanged }: { onOpened: () => void; on
                           <span className="num">{m.host}</span>
                           <Presence m={m} probe={probes[m.id]} />
                         </div>
+                        <MoldControl m={m} onChanged={reload} onError={fail} />
                       </div>
                       <div className="machine-actions">
                         <button className="btn primary" disabled={active || pending === m.id} onClick={() => open(m)}>
@@ -389,5 +391,73 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
         <button type="button" className="btn" onClick={onClose}>Cancelar</button>
       </div>
     </form>
+  )
+}
+
+/** Molde montado na máquina: trocar (fica no histórico) e ver as trocas anteriores. */
+function MoldControl({ m, onChanged, onError }: { m: Machine; onChanged: () => void; onError: (e: unknown) => void }) {
+  const [picking, setPicking] = useState(false)
+  const [molds, setMolds] = useState<Mold[] | null>(null)
+  const [choice, setChoice] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [history, setHistory] = useState<MoldMount[] | null>(null)
+  const cur = m.mold ?? null
+
+  const startPick = async () => {
+    setPicking(true); setChoice(cur?.mold_id != null ? String(cur.mold_id) : '')
+    try { setMolds((await getJson<{ molds: Mold[] }>('/api/molds')).molds) } catch (e) { onError(e); setPicking(false) }
+  }
+  const confirm = async () => {
+    setBusy(true)
+    try {
+      const r = await mountMold(m.id, choice === '' ? null : Number(choice))
+      setPicking(false); if (history) setHistory(r.history); onChanged()
+    } catch (e) { onError(e) } finally { setBusy(false) }
+  }
+  const toggleHistory = async () => {
+    if (history) { setHistory(null); return }
+    try { setHistory((await getJson<{ history: MoldMount[] }>(`/api/machines/${m.id}/mold`)).history) } catch (e) { onError(e) }
+  }
+  const free = (x: Mold) => !x.mounted_on || x.mounted_on.machine_id === m.id
+
+  return (
+    <div className="mold-line">
+      <span className="machine-sub">
+        <Boxes size={14} aria-hidden="true" />
+        {cur
+          ? <span>Molde <b className="num">{cur.mold_code}</b>{cur.mold_name && ` · ${cur.mold_name}`} · <b className="num">{cur.active_cavities}</b> {cur.active_cavities === 1 ? 'peça' : 'peças'} por ciclo</span>
+          : <span className="muted">Sem molde: conta 1 peça por ciclo</span>}
+        {!picking && <button className="btn link" onClick={startPick}>Trocar molde</button>}
+        <button className="btn link" onClick={toggleHistory} aria-expanded={!!history}><History size={13} aria-hidden="true" />Histórico</button>
+      </span>
+      {picking && (
+        <span className="form-actions">
+          <label className="field inline">
+            <span className="sr-label">Molde para {m.name}</span>
+            <select value={choice} onChange={(e) => setChoice(e.target.value)} disabled={!molds}>
+              <option value="">Sem molde (1 peça por ciclo)</option>
+              {molds?.filter(free).map((x) => <option key={x.id} value={x.id}>{x.code}{x.name && ` · ${x.name}`} · {x.active_cavities} cav.</option>)}
+            </select>
+          </label>
+          <button className="btn primary" disabled={busy || !molds || choice === (cur?.mold_id != null ? String(cur.mold_id) : '')} onClick={confirm}>
+            {busy ? 'Trocando…' : 'Confirmar troca'}
+          </button>
+          <button className="btn" onClick={() => setPicking(false)}>Cancelar</button>
+          {molds && molds.length === 0 && <span className="field-hint">Cadastre um molde na aba Moldes.</span>}
+        </span>
+      )}
+      {history && (
+        history.length === 0
+          ? <p className="muted small">Nenhuma troca de molde registrada.</p>
+          : <ul className="mold-history">
+              {history.map((h) => (
+                <li key={h.id}>
+                  <b className="num">{h.mold_code}</b>{h.mold_name && ` · ${h.mold_name}`} · {h.active_cavities} cav.
+                  <span className="muted"> — {dateTime(h.mounted_at)} até {h.removed_at ? dateTime(h.removed_at) : 'agora'}</span>
+                </li>
+              ))}
+            </ul>
+      )}
+    </div>
   )
 }

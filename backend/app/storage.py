@@ -63,25 +63,39 @@ class Storage:
     # maior aumento aceito entre duas leituras seguidas (leituras a cada poucos segundos)
     MAX_STEP = 1000
 
-    def increments(self, tag: str, since: float, bucket: float) -> list[list[float]]:
+    def increments(self, tag: str, since: float, bucket: float, raw: bool = False) -> list[list[float]]:
         """Quanto um contador subiu em cada intervalo (ex.: peças por hora).
 
         Soma só os aumentos entre leituras seguidas, então um contador zerado
         na máquina não vira um número negativo nem um pico falso. Também ignora o
         salto que parte de 0 (painel ainda sem dados, logo depois de conectar) e
         saltos acima de MAX_STEP entre duas leituras, que não são produção real.
+        Com raw=True soma todo aumento: para contadores que o próprio Monitor calcula e já
+        filtra (ex.: PieceCount, que começa em 0 e sobe ciclos x cavidades de uma vez).
         """
+        if raw:
+            cond, step = "d > 0", None
+        else:
+            cond, step = "d > 0 AND d <= ? AND prev <> 0", self.MAX_STEP
+        params = ((step,) if step is not None else ()) + (bucket, bucket, tag, since)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT b, SUM(CASE WHEN d > 0 AND d <= ? AND prev <> 0 THEN d ELSE 0 END) FROM ("
+                f"SELECT b, SUM(CASE WHEN {cond} THEN d ELSE 0 END) FROM ("
                 "  SELECT CAST(ts / ? AS INTEGER) * ? AS b,"
                 "         LAG(value) OVER (ORDER BY ts) AS prev,"
                 "         value - LAG(value) OVER (ORDER BY ts) AS d"
                 "  FROM samples WHERE tag=? AND ts>=? AND value IS NOT NULL"
                 ") GROUP BY b ORDER BY b",
-                (self.MAX_STEP, bucket, bucket, tag, since),
+                params,
             ).fetchall()
         return [[b, float(v or 0)] for b, v in rows]
+
+    def last_value(self, tag: str) -> float | None:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT value FROM samples WHERE tag=? AND value IS NOT NULL ORDER BY ts DESC LIMIT 1", (tag,)
+            ).fetchone()
+        return None if row is None else row[0]
 
     def first_value_since(self, tag: str, since: float) -> float | None:
         with self._lock:
