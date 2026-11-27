@@ -10,6 +10,7 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from .molds import MOLD_SCHEMA, MoldMixin
+from .stops import REASON_SCHEMA, ReasonMixin
 
 log = logging.getLogger(__name__)
 
@@ -37,7 +38,8 @@ CREATE TABLE IF NOT EXISTS machines (
     vnc_port INTEGER NOT NULL DEFAULT 5900,
     vnc_view_password TEXT NOT NULL DEFAULT '',
     vnc_control_password TEXT NOT NULL DEFAULT '',
-    notes TEXT NOT NULL DEFAULT ''
+    notes TEXT NOT NULL DEFAULT '',
+    stop_min_seconds INTEGER NOT NULL DEFAULT 120
 );
 CREATE TABLE IF NOT EXISTS kv (key TEXT PRIMARY KEY, value TEXT);
 """
@@ -59,6 +61,7 @@ class Machine:
     vnc_view_password: str = ""
     vnc_control_password: str = ""
     notes: str = ""
+    stop_min_seconds: int = 120  # parada só conta a partir deste tempo sem ciclo (micro-paradas não)
 
     @property
     def profile(self) -> str:
@@ -104,6 +107,9 @@ def _validate(m: Machine) -> None:
         p = getattr(m, nome)
         if not isinstance(p, int) or isinstance(p, bool) or not 1 <= p <= 65535:
             raise ValueError(f"porta inválida em {nome}: {p!r}")
+    s = m.stop_min_seconds
+    if not isinstance(s, int) or isinstance(s, bool) or not 30 <= s <= 24 * 3600:
+        raise ValueError("tempo mínimo de parada deve ficar entre 30 s e 24 h")
 
 
 def _row_to_machine(row: sqlite3.Row | tuple) -> Machine:
@@ -113,13 +119,18 @@ def _row_to_machine(row: sqlite3.Row | tuple) -> Machine:
     return Machine(**d)
 
 
-class MachineStore(MoldMixin):
+class MachineStore(MoldMixin, ReasonMixin):
     def __init__(self, path: str):
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.executescript(SCHEMA + MOLD_SCHEMA)
+        self._conn.executescript(SCHEMA + MOLD_SCHEMA + REASON_SCHEMA)
+        cols = {r[1] for r in self._conn.execute("PRAGMA table_info(machines)")}
+        if "stop_min_seconds" not in cols:  # banco criado antes das paradas
+            self._conn.execute("ALTER TABLE machines ADD COLUMN stop_min_seconds INTEGER NOT NULL DEFAULT 120")
+            self._conn.commit()
         self._lock = threading.Lock()
+        self.seed_reasons()
 
     def close(self) -> None:
         with self._lock:

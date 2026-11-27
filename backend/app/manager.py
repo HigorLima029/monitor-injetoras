@@ -86,7 +86,8 @@ class MachineManager:
             source = self.build_source(m)
             store, mid = self.store, m.id
             return Collector(source, storage, s.poll_seconds, s.full_poll_seconds, s.retention_days,
-                             cavities=lambda: store.active_cavities(mid))
+                             cavities=lambda: store.active_cavities(mid),
+                             stop_min_seconds=lambda: (store.get(mid) or m).stop_min_seconds)
         except Exception:
             storage.close()
             raise

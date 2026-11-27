@@ -6,6 +6,8 @@ import threading
 import time
 from pathlib import Path
 
+from .stops import STOP_SCHEMA, StopStorageMixin
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS samples (
     ts REAL NOT NULL,
@@ -23,12 +25,12 @@ CREATE INDEX IF NOT EXISTS ix_alarm_started ON alarm_events(started);
 """
 
 
-class Storage:
+class Storage(StopStorageMixin):
     def __init__(self, path: str):
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.executescript(SCHEMA)
+        self._conn.executescript(SCHEMA + STOP_SCHEMA)
         self._lock = threading.Lock()
 
     def close(self) -> None:
@@ -136,3 +138,4 @@ class Storage:
             self._conn.execute(
                 "DELETE FROM alarm_events WHERE ended IS NOT NULL AND ended < ?", (older_than,)
             )
+            self._conn.execute("DELETE FROM stops WHERE ended IS NOT NULL AND ended < ?", (older_than,))

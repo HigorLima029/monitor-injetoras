@@ -1,9 +1,10 @@
-import { AlertTriangle, Boxes, Factory, Server, MonitorPlay, LayoutDashboard, ListTree, Monitor, Moon, Package, Sun, SunMoon, Thermometer } from 'lucide-react'
+import { AlertTriangle, Boxes, Factory, PauseCircle, Server, MonitorPlay, LayoutDashboard, ListTree, Monitor, Moon, Package, Sun, SunMoon, Thermometer } from 'lucide-react'
 import { useEffect, useRef, useState, type ReactNode } from 'react'
 import type { Info, MachineList } from './api'
 import { activateMachine, getJson, usePoll, useLive } from './api'
 import { MachinesPage } from './MachinesPage'
 import { MoldsPage } from './MoldsPage'
+import { StopsPage } from './StopsPage'
 import { StateBadge } from './components/widgets'
 import { EstoPanel } from './hmi/EstoPanel'
 import { HmiPanel } from './hmi/HmiPanel'
@@ -12,7 +13,7 @@ import { ago } from './format'
 import { AlarmsPage, Overview, ProductionPage, Temperatures, Variables, type PageProps } from './pages'
 import { useTheme, type ThemeChoice } from './theme'
 
-type PageId = 'maquinas' | 'moldes' | 'geral' | 'painel' | 'tela' | 'temperaturas' | 'producao' | 'alarmes' | 'variaveis'
+type PageId = 'maquinas' | 'moldes' | 'geral' | 'painel' | 'tela' | 'temperaturas' | 'producao' | 'paradas' | 'alarmes' | 'variaveis'
 
 const PAGES: { id: PageId; label: string; icon: ReactNode; render: (p: PageProps) => ReactNode }[] = [
   { id: 'maquinas', label: 'Máquinas', icon: <Server size={18} />, render: () => null /* desenhada no App, que passa os callbacks */ },
@@ -25,6 +26,7 @@ const PAGES: { id: PageId; label: string; icon: ReactNode; render: (p: PageProps
   { id: 'tela', label: 'Tela ao vivo', icon: <MonitorPlay size={18} />, render: (p) => <TelaAoVivo key={p.info.machine_id} machineName={p.info.machine_name} kind={p.info.kind} /> },
   { id: 'temperaturas', label: 'Temperaturas', icon: <Thermometer size={18} />, render: (p) => <Temperatures {...p} /> },
   { id: 'producao', label: 'Produção', icon: <Package size={18} />, render: (p) => <ProductionPage {...p} /> },
+  { id: 'paradas', label: 'Paradas', icon: <PauseCircle size={18} />, render: (p) => <StopsPage key={p.info.machine_id} /> },
   { id: 'alarmes', label: 'Alarmes', icon: <AlertTriangle size={18} />, render: (p) => <AlarmsPage {...p} /> },
   { id: 'variaveis', label: 'Variáveis', icon: <ListTree size={18} />, render: (p) => <Variables {...p} /> },
 ]

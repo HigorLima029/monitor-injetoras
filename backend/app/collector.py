@@ -8,7 +8,8 @@ from typing import Any, Callable
 
 from .sources import Source
 from .storage import Storage
-from .tags import ALARM_PREFIX, HISTORY_TAGS, PIECE_TAG
+from .stops import StopTracker
+from .tags import ALARM_PREFIX, HISTORY_TAGS, PIECE_TAG, alarm_label
 
 log = logging.getLogger("coletor")
 
@@ -24,7 +25,8 @@ def to_number(value: Any) -> float | None:
 class Collector:
     def __init__(self, source: Source, storage: Storage, poll_seconds: float = 5,
                  full_poll_seconds: float = 60, retention_days: int = 7, read_timeout: float = 20,
-                 cavities: Callable[[], int] | None = None):
+                 cavities: Callable[[], int] | None = None,
+                 stop_min_seconds: Callable[[], float] | None = None):
         self.source = source
         self.storage = storage
         self.poll_seconds = poll_seconds
@@ -46,6 +48,9 @@ class Collector:
         self.cavities = cavities or (lambda: 1)
         self.piece_count: float = storage.last_value(PIECE_TAG) or 0.0
         self.reads = 0
+        # paradas: começam quando o contador fica parado mais que o tempo mínimo da máquina
+        self.stops = StopTracker(storage, stop_min_seconds or (lambda: 120))
+        self._lost_at: float | None = None
         self._last_full = 0.0
         self._last_prune = 0.0
         self._subscribers: set[asyncio.Queue] = set()
@@ -101,6 +106,8 @@ class Collector:
             try:
                 await asyncio.wait_for(self.source.connect(), self.read_timeout * 2)
                 self.tags = await asyncio.wait_for(self.source.list_tags(), self.read_timeout * 3)
+                self.stops.on_reconnect(self._lost_at, time.time())
+                self._lost_at = None
                 self.connected = True
                 self.last_error = None
                 log.info("conectado: %d variáveis", len(self.tags))
@@ -116,6 +123,9 @@ class Collector:
                 else:
                     self.last_error = f"{type(exc).__name__}: {exc}"[:300]
                 log.warning("conexão caiu: %s", self.last_error)
+                if self._lost_at is None:
+                    self._lost_at = self.last_ok
+                self.stops.on_disconnect(self.last_ok)
                 await self.source.close()
                 self._broadcast()
                 await asyncio.sleep(5)
@@ -163,6 +173,13 @@ class Collector:
         for tag in (self.active_alarms & checked) - active:
             self.storage.close_alarm(tag, now)
         self.active_alarms = (self.active_alarms - checked) | active
+
+        cycled = prev_count is not None and count is not None and count > prev_count
+        off = to_number(self.values.get("DeviceOnOff"))
+        try:
+            self.stops.on_read(now, cycled, off == 0, [alarm_label(t) for t in sorted(self.active_alarms)])
+        except Exception:  # paradas nunca derrubam a leitura
+            log.exception("falha ao registrar parada")
 
         if now - self._last_prune > 3600:
             self.storage.prune(now - self.retention_days * 86400)

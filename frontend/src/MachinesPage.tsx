@@ -31,12 +31,13 @@ interface Draft {
   clear_view: boolean
   clear_control: boolean
   notes: string
+  stop_min: string
 }
 
 const EMPTY: Draft = {
   client: 'Chen Hsong', name: '', kind: 'chy', host: '', opcua_port: '4840', namespace: '',
   ams_net_id: '', ads_port: '801', vnc_enabled: false, vnc_port: '5900',
-  vnc_view_password: '', vnc_control_password: '', clear_view: false, clear_control: false, notes: '',
+  vnc_view_password: '', vnc_control_password: '', clear_view: false, clear_control: false, notes: '', stop_min: '2',
 }
 
 function draftOf(m: Machine): Draft {
@@ -45,6 +46,7 @@ function draftOf(m: Machine): Draft {
     namespace: m.namespace === null ? '' : String(m.namespace), ams_net_id: m.ams_net_id,
     ads_port: String(m.ads_port), vnc_enabled: m.vnc_enabled, vnc_port: String(m.vnc_port),
     vnc_view_password: '', vnc_control_password: '', clear_view: false, clear_control: false, notes: m.notes,
+    stop_min: String(+(m.stop_min_seconds / 60).toFixed(1)),
   }
 }
 
@@ -78,6 +80,8 @@ function validate(d: Draft): Partial<Record<keyof Draft, string>> {
     if (d.vnc_control_password.length > 8) e.vnc_control_password = 'Use até 8 caracteres.'
   }
   if (opc && d.vnc_enabled && !isPort(d.vnc_port)) e.vnc_port = 'Use um número de 1 a 65535.'
+  const min = Number(d.stop_min.replace(',', '.'))
+  if (!(min >= 0.5 && min <= 1440)) e.stop_min = 'Use de 0,5 a 1440 minutos.'
   return e
 }
 
@@ -91,6 +95,7 @@ function toInput(d: Draft, orig: Draft | null): MachineInput {
   const body: MachineInput = {}
   const base = (['client', 'name', 'kind', 'host', 'notes'] as const)
   for (const k of base) if (!orig || orig[k] !== d[k]) body[k] = d[k].trim() as never
+  if (!orig || orig.stop_min !== d.stop_min) body.stop_min_seconds = Math.round(Number(d.stop_min.replace(',', '.')) * 60)
   if (isOpc(d.kind)) {
     if (changed('opcua_port')) body.opcua_port = +d.opcua_port
     if (changed('namespace')) body.namespace = d.namespace.trim() ? +d.namespace : null
@@ -380,6 +385,14 @@ function MachineForm({ machine, clients, onClose, onSaved }: {
           )}
         </fieldset>
       )}
+
+      <label className="field">
+        Contar parada a partir de (minutos)
+        <input inputMode="decimal" value={d.stop_min} onChange={(e) => set('stop_min', e.target.value)}
+          onBlur={blur('stop_min')} aria-invalid={err('stop_min') ? true : undefined} />
+        {err('stop_min') ? <span className="field-error">{err('stop_min')}</span>
+          : <span className="field-hint">Paradas mais curtas que isso não entram na lista (micro-paradas).</span>}
+      </label>
 
       <label className="field">
         Observações

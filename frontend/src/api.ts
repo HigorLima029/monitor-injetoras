@@ -48,6 +48,7 @@ export interface Machine {
   vnc_enabled: boolean
   vnc_port: number
   notes: string
+  stop_min_seconds: number
   has_view_password: boolean
   has_control_password: boolean
   profile: 'chy' | 'em63' | 'ads' | 'inovance'
@@ -216,6 +217,35 @@ export const saveMold = (m: MoldInput, id?: number) =>
 export const deleteMold = (id: number) => send<void>('DELETE', `/api/molds/${id}`)
 export const mountMold = (machineId: number, moldId: number | null) =>
   send<{ current: MoldMount | null; history: MoldMount[] }>('PUT', `/api/machines/${machineId}/mold`, { mold_id: moldId })
+
+export interface Stop {
+  id: number
+  started: number
+  ended: number | null
+  open: boolean
+  duration: number
+  reason: string | null
+  reason_label: string | null
+  auto: boolean
+  detail: string
+  note: string
+}
+
+export interface StopReason { code: string; label: string; active: boolean }
+
+export interface Stops {
+  since: number
+  stops: Stop[]
+  summary: { reason: string | null; label: string; seconds: number; count: number }[]
+  total_seconds: number
+  unclassified: number
+}
+
+export const classifyStop = (id: number, reason: string | null, note: string) =>
+  send<Stop>('PUT', `/api/stops/${id}`, { reason, note })
+export const addStopReason = (label: string) => send<StopReason>('POST', '/api/stop-reasons', { label })
+export const updateStopReason = (code: string, changes: { label?: string; active?: boolean }) =>
+  send<StopReason>('PUT', `/api/stop-reasons/${code}`, changes)
 
 /** Busca uma URL e repete a cada `everyMs`. */
 export function usePoll<T>(url: string | null, everyMs = 30000) {
