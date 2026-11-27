@@ -4,11 +4,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
-from typing import Any
+from typing import Any, Callable
 
 from .sources import Source
 from .storage import Storage
-from .tags import ALARM_PREFIX, HISTORY_TAGS
+from .tags import ALARM_PREFIX, HISTORY_TAGS, PIECE_TAG
 
 log = logging.getLogger("coletor")
 
@@ -23,7 +23,8 @@ def to_number(value: Any) -> float | None:
 
 class Collector:
     def __init__(self, source: Source, storage: Storage, poll_seconds: float = 5,
-                 full_poll_seconds: float = 60, retention_days: int = 7, read_timeout: float = 20):
+                 full_poll_seconds: float = 60, retention_days: int = 7, read_timeout: float = 20,
+                 cavities: Callable[[], int] | None = None):
         self.source = source
         self.storage = storage
         self.poll_seconds = poll_seconds
@@ -40,6 +41,10 @@ class Collector:
         self.values: dict[str, Any] = {}
         self.active_alarms: set[str] = storage.open_alarm_tags()
         self.last_count_change: float | None = None
+        # Peças = ciclos x cavidades ativas do molde montado na hora de cada ciclo. O total é
+        # acumulado aqui (e guardado como PieceCount), para a troca de molde não mudar o passado.
+        self.cavities = cavities or (lambda: 1)
+        self.piece_count: float = storage.last_value(PIECE_TAG) or 0.0
         self.reads = 0
         self._last_full = 0.0
         self._last_prune = 0.0
@@ -134,6 +139,18 @@ class Collector:
         count = to_number(self.values.get("ProductionCount"))
         if prev_count is not None and count is not None and count != prev_count:
             self.last_count_change = now
+        if count is not None:
+            step = count - prev_count if prev_count is not None else 0.0
+            # mesmas regras do histórico: ignora contador zerado, salto vindo de 0 e salto falso
+            if 0 < step <= Storage.MAX_STEP and prev_count != 0:
+                try:
+                    cav = max(1, int(self.cavities()))
+                except Exception:  # cadastro indisponível: conta 1 peça por ciclo
+                    log.exception("não deu para ler as cavidades do molde")
+                    cav = 1
+                self.piece_count += step * cav
+            values = {**values, PIECE_TAG: self.piece_count}
+            self.values[PIECE_TAG] = self.piece_count
 
         history = {t: to_number(values[t]) for t in HISTORY_TAGS if t in values}
         if history:

@@ -49,7 +49,7 @@ export function Overview({ info, live, tokens }: PageProps) {
       <div className={comModo ? 'grid tiles cinco' : 'grid tiles'}>
         <Tile icon={<Package size={16} aria-hidden="true" />} label="Peças nas últimas 8 h"
           value={fmt(prod?.produced ?? null, 0)}
-          sub={`Contador da máquina: ${fmt(num(v.ProductionCount), 0)}`} />
+          sub={`Ciclos da máquina: ${fmt(num(v.ProductionCount), 0)} · peças = ciclos × cavidades`} />
         <Tile icon={<Timer size={16} aria-hidden="true" />} label="Último ciclo"
           value={fmt(num(v.CycleMonitor), 1)} unit="s"
           sub={prod?.avg_cycle ? `Média em 8 h: ${fmt(prod.avg_cycle, 1)} s` : 'Sem ciclos registrados ainda'} />

@@ -18,7 +18,8 @@ from .config import settings
 from .machines import CONNECTION_FIELDS, Machine, MachineStore, seed_from_settings
 from .manager import MachineManager
 from .vnc_hub import VncHub, WebSocketTransport
-from .tags import ADS_ZONES, ALARM_PREFIX, BARREL_ZONES, KPI_META, alarm_label, humanize
+from .molds import Mold
+from .tags import ADS_ZONES, ALARM_PREFIX, BARREL_ZONES, KPI_META, PIECE_TAG, alarm_label, humanize
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -119,7 +120,8 @@ def list_machines():
     mgr = _mgr(app)
     return {
         "active_id": mgr.store.active_id(),
-        "machines": [{**m.public(), "status": mgr.status_of(m.id)} for m in mgr.store.list()],
+        "machines": [{**m.public(), "status": mgr.status_of(m.id), "mold": mgr.store.mounted_mold(m.id)}
+                     for m in mgr.store.list()],
     }
 
 
@@ -158,6 +160,90 @@ def delete_machine(id: int):
         raise HTTPException(409, "Não dá para apagar a máquina aberta. Abra outra antes.")
     mgr.store.delete(id)
     return Response(status_code=204)
+
+
+# ---- moldes ------------------------------------------------------------
+class MoldIn(BaseModel):
+    code: str
+    name: str = ""
+    cavities: int = 1
+    active_cavities: int | None = None
+    notes: str = ""
+
+
+class MoldUpdate(BaseModel):
+    code: str | None = None
+    name: str | None = None
+    cavities: int | None = None
+    active_cavities: int | None = None
+    notes: str | None = None
+
+
+class MountIn(BaseModel):
+    mold_id: int | None = None  # None = retirar o molde
+
+
+@app.get("/api/molds")
+def list_molds():
+    store = _mgr(app).store
+    mounted = {}
+    for m in store.list():
+        cur = store.mounted_mold(m.id)
+        if cur and cur["mold_id"] is not None:
+            mounted[cur["mold_id"]] = {"machine_id": m.id, "machine_name": m.name}
+    return {"molds": [{**x.public(), "mounted_on": mounted.get(x.id)} for x in store.list_molds()]}
+
+
+@app.post("/api/molds", status_code=201)
+def add_mold(body: MoldIn):
+    try:
+        return _mgr(app).store.add_mold(Mold(None, **body.model_dump())).public()
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.put("/api/molds/{id}")
+def update_mold(id: int, body: MoldUpdate):
+    changes = body.model_dump(exclude_unset=True)
+    for k in ("code", "cavities"):
+        if k in changes and changes[k] is None:
+            raise HTTPException(422, f"{k} não pode ficar vazio")
+    try:
+        return _mgr(app).store.update_mold(id, changes).public()
+    except KeyError:
+        raise HTTPException(404, "Molde não encontrado")
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+
+
+@app.delete("/api/molds/{id}", status_code=204)
+def delete_mold(id: int):
+    store = _mgr(app).store
+    if store.get_mold(id) is None:
+        raise HTTPException(404, "Molde não encontrado")
+    try:
+        store.delete_mold(id)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc))
+    return Response(status_code=204)
+
+
+@app.get("/api/machines/{id}/mold")
+def machine_mold(id: int):
+    _get_or_404(id)
+    store = _mgr(app).store
+    return {"current": store.mounted_mold(id), "history": store.mold_history(id)}
+
+
+@app.put("/api/machines/{id}/mold")
+def mount_mold(id: int, body: MountIn):
+    _get_or_404(id)
+    store = _mgr(app).store
+    try:
+        current = store.mount_mold(id, body.mold_id)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc))
+    return {"current": current, "history": store.mold_history(id)}
 
 
 @app.post("/api/machines/{id}/activate")
@@ -226,12 +312,24 @@ def history(tags: str = Query(..., description="tags separadas por vírgula"),
     return {"since": since, "series": _c(app).storage.history(wanted, since)}
 
 
+def _pieces_per_bucket(storage, since: float, bucket: float) -> list[list[float]]:
+    """Peças por intervalo: usa PieceCount (ciclos x cavidades); onde ainda não há PieceCount
+    (histórico de antes do cadastro de moldes), cai no contador da máquina."""
+    cycles = storage.increments("ProductionCount", since, bucket)
+    pieces = {b: v for b, v in storage.increments(PIECE_TAG, since, bucket, raw=True)}
+    if not pieces:
+        return cycles
+    merged = {b: v for b, v in cycles}
+    merged.update(pieces)
+    return [[b, merged[b]] for b in sorted(merged)]
+
+
 @app.get("/api/production")
 def production(hours: float = Query(8, ge=1, le=24 * 31)):
     c = _c(app)
     since = time.time() - hours * 3600
     bucket = 3600 if hours > 2 else 600
-    per_bucket = c.storage.increments("ProductionCount", since, bucket)
+    per_bucket = _pieces_per_bucket(c.storage, since, bucket)
     bad_bucket = c.storage.increments("BadProduction", since, bucket)
     cycles = c.storage.history(["CycleMonitor"], since, max_points=200)["CycleMonitor"]
     cycle_vals = [v for _, v in cycles if v]

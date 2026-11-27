@@ -9,6 +9,8 @@ from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from urllib.parse import urlparse
 
+from .molds import MOLD_SCHEMA, MoldMixin
+
 log = logging.getLogger(__name__)
 
 KINDS = ("chy", "em63", "ads", "inovance", "demo")
@@ -111,12 +113,12 @@ def _row_to_machine(row: sqlite3.Row | tuple) -> Machine:
     return Machine(**d)
 
 
-class MachineStore:
+class MachineStore(MoldMixin):
     def __init__(self, path: str):
         if path != ":memory:":
             Path(path).parent.mkdir(parents=True, exist_ok=True)
         self._conn = sqlite3.connect(path, check_same_thread=False)
-        self._conn.executescript(SCHEMA)
+        self._conn.executescript(SCHEMA + MOLD_SCHEMA)
         self._lock = threading.Lock()
 
     def close(self) -> None:
@@ -184,6 +186,10 @@ class MachineStore:
     def delete(self, id: int) -> None:
         with self._lock, self._conn:
             self._conn.execute("DELETE FROM machines WHERE id=?", (id,))
+            self._conn.execute(
+                "UPDATE mold_mounts SET removed_at=strftime('%s','now') WHERE machine_id=? AND removed_at IS NULL",
+                (id,),
+            )
             self._conn.execute("DELETE FROM kv WHERE key='active_id' AND value=?", (str(id),))
 
     def active_id(self) -> int | None:

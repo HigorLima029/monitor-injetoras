@@ -452,3 +452,12 @@ textarea { resize: vertical; }
   .panel-keys, .panel-keys.cinco { grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
   .panel-key { min-width: 0; }
 }
+
+/* moldes */
+.mold-line { display: grid; gap: 6px; margin-top: 6px; }
+.mold-line .machine-sub { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.btn.link { border: 0; background: none; padding: 2px 4px; color: var(--accent, #2b7bd8); font-size: 13px; }
+.btn.link:hover { text-decoration: underline; }
+.field.inline { display: inline-grid; }
+.sr-label { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+.mold-history { margin: 0; padding-left: 18px; font-size: 13px; display: grid; gap: 2px; }
