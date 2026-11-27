@@ -12,6 +12,7 @@ import time
 
 from .config import settings
 from .storage import Storage
+from .tags import alarm_label
 
 SETPOINTS = {"TempNozzle": 99.0, "TempZ1": 270.0, "TempZ2": 260.0, "TempZ3": 250.0,
              "TempZ4": 200.0, "TempZ5": 200.0, "TempOil": 45.0}
@@ -52,9 +53,14 @@ def seed(storage: Storage, hours: float = 8, step: float = 30, seed_value: int =
                 vals["Max" + sp_tag] = 20.0
         storage.add_samples(t, vals)
         t += step
-    for a, b, tag in stop_windows:
+    for i, (a, b, tag) in enumerate(stop_windows):
         storage.open_alarm(tag, a)
         storage.close_alarm(tag, b)
+        # paradas da demonstração: duas com o motivo sugerido pelo alarme e uma sem motivo
+        if i < 2:
+            storage.start_stop(a, "falha", alarm_label(tag), ended=b)
+        else:
+            storage.start_stop(a, ended=b)
 
 
 if __name__ == "__main__":
